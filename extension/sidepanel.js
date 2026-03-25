@@ -4,79 +4,112 @@ const state = {
   journey: [],
   currentUrl: '',
   currentDomain: '',
-  hasConfig: false,
-  lastGoal: ''
+  lastGoal: '',
+  firecrawlKey: ''
 };
 
-// DOM elements
-const chatContainer = document.getElementById('chat-container');
+// DOM
+const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
-const settingsBtn = document.getElementById('settings-btn');
-const settingsPanel = document.getElementById('settings-panel');
-const chatContainerEl = document.getElementById('chat-container');
-const inputSection = chatForm.closest('.px-4');
-const supabaseUrlInput = document.getElementById('supabase-url-input');
-const anonKeyInput = document.getElementById('anon-key-input');
-const saveConfigBtn = document.getElementById('save-config-btn');
-const configStatus = document.getElementById('config-status');
-const backBtn = document.getElementById('back-btn');
-const pageContext = document.getElementById('page-context');
 const journeyBar = document.getElementById('journey-bar');
-const journeySteps = document.getElementById('journey-steps');
+const welcomeScreen = document.getElementById('welcome-screen');
+
+// Tabs
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(`panel-${tab.dataset.tab}`).classList.add('active');
+  });
+});
+
+// Settings
+document.getElementById('save-btn').addEventListener('click', () => {
+  const key = document.getElementById('firecrawl-key-input').value.trim();
+  if (!key) {
+    showStatus('Please enter your API key', false);
+    return;
+  }
+  chrome.storage.local.set({ firecrawl_key: key }, () => {
+    state.firecrawlKey = key;
+    showStatus('Settings saved securely ✓', true);
+  });
+});
+
+document.getElementById('clear-btn').addEventListener('click', () => {
+  chrome.storage.local.clear(() => {
+    state.firecrawlKey = '';
+    state.messages = [];
+    state.journey = [];
+    document.getElementById('firecrawl-key-input').value = '';
+    chatMessages.innerHTML = '';
+    chatMessages.appendChild(welcomeScreen);
+    welcomeScreen.style.display = 'flex';
+    journeyBar.classList.remove('visible');
+    journeyBar.innerHTML = '';
+    showStatus('All data cleared', true);
+  });
+});
+
+function showStatus(msg, ok) {
+  const el = document.getElementById('status-text');
+  el.textContent = msg;
+  el.className = 'status-text ' + (ok ? 'success' : 'error');
+  setTimeout(() => { el.textContent = ''; }, 3000);
+}
 
 // Init
 async function init() {
-  const result = await chrome.storage.local.get(['supabase_url', 'supabase_anon_key', 'journey_state']);
-  state.hasConfig = !!(result.supabase_url && result.supabase_anon_key);
+  const result = await chrome.storage.local.get(['firecrawl_key', 'journey_state', 'chat_history']);
+  state.firecrawlKey = result.firecrawl_key || '';
+  if (result.firecrawl_key) {
+    document.getElementById('firecrawl-key-input').value = result.firecrawl_key;
+  }
   if (result.journey_state) {
     state.journey = result.journey_state;
     renderJourney();
   }
+  if (result.chat_history?.length) {
+    welcomeScreen.style.display = 'none';
+    result.chat_history.forEach(m => addMessage(m.role, m.text, true));
+    state.messages = result.chat_history;
+  }
   updatePageContext();
 
-  // Listen for tab changes
   chrome.tabs.onActivated?.addListener(() => updatePageContext());
-  chrome.tabs.onUpdated?.addListener((tabId, changeInfo) => {
+  chrome.tabs.onUpdated?.addListener((_, changeInfo) => {
     if (changeInfo.status === 'complete') handlePageChange();
   });
-
-  // Listen for SPA URL changes from content script
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message.type === 'URL_CHANGED') {
-      handlePageChange();
-    }
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === 'URL_CHANGED') handlePageChange();
   });
 }
 
 function updatePageContext() {
-  chrome.runtime.sendMessage({ type: 'GET_PAGE_INFO' }, (response) => {
-    if (response?.url) {
+  chrome.runtime.sendMessage({ type: 'GET_PAGE_INFO' }, (res) => {
+    if (res?.url) {
       try {
-        const url = new URL(response.url);
-        const domain = url.hostname;
-        pageContext.textContent = domain;
+        const domain = new URL(res.url).hostname;
         if (domain !== state.currentDomain && state.currentDomain) {
           addJourneyStep(domain);
         }
-        state.currentUrl = response.url;
+        state.currentUrl = res.url;
         state.currentDomain = domain;
-      } catch {
-        pageContext.textContent = 'Ready to help';
-      }
+      } catch {}
     }
   });
 }
 
 function handlePageChange() {
   updatePageContext();
-  // If user has an active goal, auto-analyze the new page
   setTimeout(() => {
-    if (state.lastGoal && state.hasConfig) {
-      addMessage('assistant', `🔄 Page changed! Analyzing the new page...`);
+    if (state.lastGoal && state.firecrawlKey) {
+      addMessage('assistant', '🔄 Page changed — analyzing...');
       analyzeCurrentPage(state.lastGoal);
     }
-  }, 1500); // Wait for page to settle
+  }, 1500);
 }
 
 function addJourneyStep(domain) {
@@ -88,55 +121,13 @@ function addJourneyStep(domain) {
 }
 
 function renderJourney() {
-  if (state.journey.length === 0) {
-    journeyBar.classList.add('hidden');
-    return;
-  }
-  journeyBar.classList.remove('hidden');
-  journeySteps.innerHTML = state.journey.map((step, i) => {
+  if (!state.journey.length) { journeyBar.classList.remove('visible'); return; }
+  journeyBar.classList.add('visible');
+  journeyBar.innerHTML = state.journey.map((s, i) => {
     const isLast = i === state.journey.length - 1;
-    return `<span class="${isLast ? 'text-purple-400 font-medium' : ''}">${step}</span>${!isLast ? '<span class="text-white/20">→</span>' : ''}`;
+    return `<span class="${isLast ? 'step-active' : ''}">${s}</span>${!isLast ? '<span class="arrow">→</span>' : ''}`;
   }).join('');
 }
-
-// Settings toggle
-settingsBtn.addEventListener('click', () => {
-  const isHidden = settingsPanel.classList.contains('hidden');
-  settingsPanel.classList.toggle('hidden');
-  chatContainerEl.classList.toggle('hidden', !settingsPanel.classList.contains('hidden'));
-  inputSection.classList.toggle('hidden', !settingsPanel.classList.contains('hidden'));
-  if (isHidden) {
-    chrome.storage.local.get(['supabase_url', 'supabase_anon_key'], (result) => {
-      if (result.supabase_url) supabaseUrlInput.value = result.supabase_url;
-      if (result.supabase_anon_key) anonKeyInput.value = result.supabase_anon_key;
-      if (result.supabase_url && result.supabase_anon_key) {
-        configStatus.textContent = '✓ Configuration saved';
-        configStatus.className = 'text-xs text-green-400';
-      }
-    });
-  }
-});
-
-backBtn.addEventListener('click', () => {
-  settingsPanel.classList.add('hidden');
-  chatContainerEl.classList.remove('hidden');
-  inputSection.classList.remove('hidden');
-});
-
-saveConfigBtn.addEventListener('click', () => {
-  const url = supabaseUrlInput.value.trim();
-  const key = anonKeyInput.value.trim();
-  if (!url || !key) {
-    configStatus.textContent = 'Please fill in both fields';
-    configStatus.className = 'text-xs text-red-400';
-    return;
-  }
-  chrome.storage.local.set({ supabase_url: url, supabase_anon_key: key }, () => {
-    state.hasConfig = true;
-    configStatus.textContent = '✓ Configuration saved securely';
-    configStatus.className = 'text-xs text-green-400';
-  });
-});
 
 // Chat
 chatForm.addEventListener('submit', async (e) => {
@@ -145,133 +136,110 @@ chatForm.addEventListener('submit', async (e) => {
   if (!text) return;
   chatInput.value = '';
 
-  addMessage('user', text);
-  state.lastGoal = text;
-
-  if (!state.hasConfig) {
-    addMessage('assistant', '⚙️ Please configure your backend URL first! Click the gear icon in the top-right.');
+  if (!state.firecrawlKey) {
+    addMessage('user', text);
+    addMessage('assistant', '⚙️ Please add your Firecrawl API key in the **Settings** tab first.');
     return;
   }
 
+  addMessage('user', text);
+  state.lastGoal = text;
   await analyzeCurrentPage(text);
 });
 
 async function analyzeCurrentPage(userMessage) {
   const typingEl = showTyping();
-
-  // Clear previous highlights
   chrome.runtime.sendMessage({ type: 'CLEAR_HIGHLIGHTS' });
 
   try {
-    // Get current page URL
     const pageInfo = await new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'GET_PAGE_INFO' }, resolve);
     });
 
-    const currentUrl = pageInfo?.url || state.currentUrl;
-    if (!currentUrl || currentUrl.startsWith('chrome://')) {
-      removeTyping(typingEl);
-      addMessage('assistant', '⚠️ I can\'t analyze Chrome internal pages. Please navigate to a website first.');
+    const url = pageInfo?.url || state.currentUrl;
+    if (!url || url.startsWith('chrome://')) {
+      removeEl(typingEl);
+      addMessage('assistant', '⚠️ Navigate to a website first — I can\'t read Chrome internal pages.');
       return;
     }
 
     const response = await new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({
-        type: 'CALL_GUIDE',
-        payload: {
-          url: currentUrl,
-          userMessage,
-          pageContext: state.journey.join(' → ')
-        }
+        type: 'SCRAPE_AND_GUIDE',
+        payload: { url, userMessage, pageContext: state.journey.join(' → '), firecrawlKey: state.firecrawlKey }
       }, (res) => {
-        if (res?.error && !res.success) reject(new Error(res.error === 'NO_CONFIG' ? res.message : res.error));
+        if (res?.error && !res.success) reject(new Error(res.error));
         else resolve(res);
       });
     });
 
-    removeTyping(typingEl);
+    removeEl(typingEl);
 
-    if (response?.message) {
-      addMessage('assistant', response.message);
-    }
-
+    if (response?.message) addMessage('assistant', response.message);
     if (response?.element?.selector) {
       chrome.runtime.sendMessage({
         type: 'HIGHLIGHT_ELEMENT',
         selector: response.element.selector,
-        description: response.element.description || 'Click here to continue your integration.'
+        description: response.element.description || 'Click here to continue.'
       });
-      addMessage('assistant', `🟣 I've highlighted the **${response.element.description || 'target element'}** on the page. Look for the purple glow!`);
+      addMessage('assistant', `🟣 I've highlighted the **${response.element.description || 'target'}** on the page.`);
     }
-
     if (response?.nextStep) {
-      addMessage('assistant', `📋 **Next up:** ${response.nextStep}`);
+      addMessage('assistant', `📋 **Next:** ${response.nextStep}`);
     }
-
   } catch (err) {
-    removeTyping(typingEl);
-    addMessage('assistant', `❌ Error: ${err.message}`);
+    removeEl(typingEl);
+    addMessage('assistant', `❌ ${err.message}`);
   }
 }
 
-function addMessage(role, text) {
-  state.messages.push({ role, text });
-  const div = document.createElement('div');
-  div.className = 'msg-appear flex gap-2.5';
+function addMessage(role, text, silent) {
+  if (welcomeScreen.style.display !== 'none') welcomeScreen.style.display = 'none';
 
-  if (role === 'user') {
-    div.innerHTML = `
-      <div class="ml-auto bg-purple-500/20 border border-purple-500/30 rounded-xl rounded-tr-sm px-3 py-2 text-sm text-white/90 max-w-[85%]">
-        ${escapeHtml(text)}
-      </div>
-    `;
-  } else {
-    div.innerHTML = `
-      <div class="w-6 h-6 rounded-full bg-gradient-to-br from-purple-500 to-purple-600 flex items-center justify-center shrink-0 mt-0.5">
-        <svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 12h3v8h6v-6h2v6h6v-8h3L12 2z"/></svg>
-      </div>
-      <div class="bg-navy-700 rounded-xl rounded-tl-sm px-3 py-2 text-sm text-white/90 max-w-[85%]">
-        ${formatMarkdown(text)}
-      </div>
-    `;
+  state.messages.push({ role, text });
+  if (!silent) {
+    chrome.storage.local.set({ chat_history: state.messages.slice(-50) }); // keep last 50
   }
 
-  chatContainer.appendChild(div);
-  chatContainer.scrollTop = chatContainer.scrollHeight;
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+
+  if (role === 'assistant') {
+    div.innerHTML = `
+      <div class="msg-avatar">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 12h3v8h6v-6h2v6h6v-8h3L12 2z"/></svg>
+      </div>
+      <div class="msg-bubble">${formatMd(text)}</div>
+    `;
+  } else {
+    div.innerHTML = `<div class="msg-bubble">${esc(text)}</div>`;
+  }
+
+  chatMessages.appendChild(div);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
 function showTyping() {
   const div = document.createElement('div');
-  div.className = 'msg-appear flex gap-2.5';
-  div.id = 'typing-indicator';
+  div.className = 'msg assistant';
   div.innerHTML = `
-    <div class="w-6 h-6 rounded-full bg-gradient-to-br from-purple-500 to-purple-600 flex items-center justify-center shrink-0 mt-0.5">
-      <svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 12h3v8h6v-6h2v6h6v-8h3L12 2z"/></svg>
+    <div class="msg-avatar">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 12h3v8h6v-6h2v6h6v-8h3L12 2z"/></svg>
     </div>
-    <div class="bg-navy-700 rounded-xl rounded-tl-sm px-3 py-3 flex gap-1">
-      <span class="typing-dot w-1.5 h-1.5 bg-white/50 rounded-full"></span>
-      <span class="typing-dot w-1.5 h-1.5 bg-white/50 rounded-full"></span>
-      <span class="typing-dot w-1.5 h-1.5 bg-white/50 rounded-full"></span>
-    </div>
+    <div class="msg-bubble"><div class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div></div>
   `;
-  chatContainer.appendChild(div);
-  chatContainer.scrollTop = chatContainer.scrollHeight;
+  chatMessages.appendChild(div);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
   return div;
 }
 
-function removeTyping(el) { el?.remove(); }
-
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
-}
-
-function formatMarkdown(text) {
-  return escapeHtml(text)
+function removeEl(el) { el?.remove(); }
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function formatMd(t) {
+  return esc(t)
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.*?)\*/g, '<em>$1</em>')
-    .replace(/`(.*?)`/g, '<code class="bg-white/10 px-1 rounded text-xs">$1</code>');
+    .replace(/`(.*?)`/g, '<code>$1</code>');
 }
 
 init();
