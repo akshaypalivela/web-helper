@@ -144,6 +144,7 @@ chatForm.addEventListener('submit', async (e) => {
 
   addMessage('user', text);
   state.lastGoal = text;
+  addMessage('assistant', `🔍 Searching for **"${text}"** on this page...`);
   await analyzeCurrentPage(text);
 });
 
@@ -182,7 +183,11 @@ async function analyzeCurrentPage(userMessage) {
         selector: response.element.selector,
         description: response.element.description || 'Click here to continue.'
       });
-      addMessage('assistant', `🟣 I've highlighted the **${response.element.description || 'target'}** on the page.`);
+    }
+    if (response?.alternatives?.length) {
+      response.alternatives.forEach((alt, i) => {
+        addMessage('assistant', `${i === 0 ? '🔹' : '🔸'} Alt: **${alt.description}** — say "try ${i + 2}" to highlight it instead.`);
+      });
     }
     if (response?.nextStep) {
       addMessage('assistant', `📋 **Next:** ${response.nextStep}`);
