@@ -1,3 +1,18 @@
+// Helper: convert image URL to raw base64 string
+async function imageUrlToBase64(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Failed to fetch screenshot: ${response.status}`);
+  const blob = await response.blob();
+  if (blob.type.includes('text/html')) throw new Error('Expected image but got text/html');
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 // Open side panel when extension icon is clicked
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
@@ -107,11 +122,14 @@ RULES:
     { text: `User intent: "${userMessage}"\n\nPage title: "${pageTitle}"\n\nPage content (markdown):\n${markdown.substring(0, 3000)}` },
   ];
 
-  // Add screenshot as inline image
-  // Firecrawl returns base64 screenshot (data URI or raw base64)
-  let base64Data = screenshot;
-  if (base64Data.startsWith('data:')) {
-    base64Data = base64Data.split(',')[1];
+  // Convert screenshot to base64 - handle URL, data URI, or raw base64
+  let base64Data;
+  if (screenshot.startsWith('http://') || screenshot.startsWith('https://')) {
+    base64Data = await imageUrlToBase64(screenshot);
+  } else if (screenshot.startsWith('data:')) {
+    base64Data = screenshot.split(',')[1];
+  } else {
+    base64Data = screenshot;
   }
 
   const body = {
