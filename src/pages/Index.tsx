@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Download, Shield, Eye, MessageSquare, ArrowRight, Compass, Zap, Layers } from "lucide-react";
+import { Download, Shield, Eye, MessageSquare, Compass, Zap, Lock } from "lucide-react";
 
 const downloadExtension = () => {
   fetch("/integration-guide.zip")
@@ -18,33 +18,18 @@ const downloadExtension = () => {
 };
 
 const features = [
-  {
-    icon: MessageSquare,
-    title: "Natural Language Chat",
-    description: "Tell it what you want to integrate — it understands context and guides you step by step."
-  },
-  {
-    icon: Eye,
-    title: "Visual Highlights",
-    description: "Elements you need to click get a pulsing purple glow with an AI tip bubble."
-  },
-  {
-    icon: Compass,
-    title: "Cross-Domain Journey",
-    description: "Tracks your integration progress as you navigate between different tools and services."
-  },
-  {
-    icon: Zap,
-    title: "Firecrawl Powered",
-    description: "Scrapes pages with screenshot + markdown, then AI identifies the exact element to click."
-  }
+  { icon: MessageSquare, title: "Natural Language Chat", description: "Describe what you want to integrate — it guides you step by step." },
+  { icon: Eye, title: "Visual Highlights", description: "Elements you need to click get a pulsing purple glow with an AI tip." },
+  { icon: Compass, title: "Cross-Domain Journey", description: "Tracks progress as you navigate between tools and services." },
+  { icon: Zap, title: "Firecrawl Powered", description: "Scrapes pages with screenshot + markdown to identify the exact element." },
+  { icon: Lock, title: "100% Local-First", description: "Your API keys and data never leave your browser. No external servers." },
 ];
 
 const steps = [
   { num: "01", text: "Download & unzip the extension" },
   { num: "02", text: "Open chrome://extensions and enable Developer Mode" },
   { num: "03", text: "Click 'Load unpacked' and select the folder" },
-  { num: "04", text: "Click the extension icon — the sidebar opens automatically" },
+  { num: "04", text: "Add your Firecrawl API key in the Settings tab" },
 ];
 
 const Index = () => {
@@ -52,20 +37,18 @@ const Index = () => {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      {/* Hero */}
       <section className="relative overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-b from-primary/10 via-transparent to-transparent" />
         <div className="relative max-w-4xl mx-auto px-6 pt-24 pb-16 text-center">
           <div className="inline-flex items-center gap-2 bg-secondary px-4 py-1.5 rounded-full text-xs text-muted-foreground mb-8">
-            <Layers className="w-3.5 h-3.5 text-primary" />
-            Chrome Extension · Manifest V3
+            <Shield className="w-3.5 h-3.5 text-primary" />
+            100% Local-First · No Backend
           </div>
           <h1 className="text-5xl sm:text-6xl font-bold tracking-tight leading-[1.1] mb-6">
-            Integration
-            <span className="block text-primary">Guide</span>
+            Integration<span className="block text-primary">Guide</span>
           </h1>
           <p className="text-lg text-muted-foreground max-w-xl mx-auto mb-10 leading-relaxed">
-            An AI-powered sidebar that walks you through any integration — highlighting exactly where to click, step by step.
+            An AI sidebar that highlights exactly where to click. Your keys stay in your browser.
           </p>
           <button
             onClick={downloadExtension}
@@ -77,13 +60,12 @@ const Index = () => {
         </div>
       </section>
 
-      {/* Features */}
       <section className="max-w-4xl mx-auto px-6 py-20">
         <div className="grid sm:grid-cols-2 gap-4">
           {features.map((f, i) => (
             <div
               key={i}
-              className="bg-card border border-border rounded-2xl p-6 transition-all duration-300 hover:border-primary/40 hover:shadow-lg hover:shadow-primary/5 cursor-default"
+              className={`bg-card border border-border rounded-2xl p-6 transition-all duration-300 hover:border-primary/40 hover:shadow-lg hover:shadow-primary/5 cursor-default ${i === features.length - 1 ? 'sm:col-span-2' : ''}`}
               onMouseEnter={() => setHoveredFeature(i)}
               onMouseLeave={() => setHoveredFeature(null)}
             >
@@ -97,7 +79,6 @@ const Index = () => {
         </div>
       </section>
 
-      {/* Install Steps */}
       <section className="max-w-4xl mx-auto px-6 py-20 border-t border-border">
         <h2 className="text-2xl font-bold mb-10 text-center">Get Started</h2>
         <div className="grid sm:grid-cols-2 gap-4 max-w-2xl mx-auto">
@@ -116,9 +97,8 @@ const Index = () => {
         </div>
       </section>
 
-      {/* Footer */}
       <footer className="border-t border-border py-8 text-center text-xs text-muted-foreground">
-        Integration Guide · Powered by Firecrawl + AI
+        Integration Guide · 100% Local-First · Powered by Firecrawl
       </footer>
     </div>
   );
