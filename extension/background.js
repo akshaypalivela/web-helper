@@ -107,11 +107,14 @@ RULES:
     { text: `User intent: "${userMessage}"\n\nPage title: "${pageTitle}"\n\nPage content (markdown):\n${markdown.substring(0, 3000)}` },
   ];
 
-  // Add screenshot as inline image
-  // Firecrawl returns base64 screenshot (data URI or raw base64)
-  let base64Data = screenshot;
-  if (base64Data.startsWith('data:')) {
-    base64Data = base64Data.split(',')[1];
+  // Convert screenshot to base64 - handle URL, data URI, or raw base64
+  let base64Data;
+  if (screenshot.startsWith('http://') || screenshot.startsWith('https://')) {
+    base64Data = await imageUrlToBase64(screenshot);
+  } else if (screenshot.startsWith('data:')) {
+    base64Data = screenshot.split(',')[1];
+  } else {
+    base64Data = screenshot;
   }
 
   const body = {

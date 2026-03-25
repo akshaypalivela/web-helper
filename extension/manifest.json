@@ -4,7 +4,7 @@
   "version": "3.0.0",
   "description": "AI-powered integration guide using Gemini Vision + Firecrawl. 100% local-first.",
   "permissions": ["sidePanel", "storage", "activeTab", "scripting", "tabs"],
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": ["<all_urls>", "https://storage.googleapis.com/*"],
   "action": {
     "default_icon": "icon.png",
     "default_title": "Open Integration Guide"
