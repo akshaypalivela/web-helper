@@ -2,8 +2,10 @@
 const state = {
   messages: [],
   journey: [],
+  currentUrl: '',
   currentDomain: '',
-  hasApiKey: false
+  hasConfig: false,
+  lastGoal: ''
 };
 
 // DOM elements
@@ -14,9 +16,10 @@ const settingsBtn = document.getElementById('settings-btn');
 const settingsPanel = document.getElementById('settings-panel');
 const chatContainerEl = document.getElementById('chat-container');
 const inputSection = chatForm.closest('.px-4');
-const apiKeyInput = document.getElementById('api-key-input');
-const saveKeyBtn = document.getElementById('save-key-btn');
-const keyStatus = document.getElementById('key-status');
+const supabaseUrlInput = document.getElementById('supabase-url-input');
+const anonKeyInput = document.getElementById('anon-key-input');
+const saveConfigBtn = document.getElementById('save-config-btn');
+const configStatus = document.getElementById('config-status');
 const backBtn = document.getElementById('back-btn');
 const pageContext = document.getElementById('page-context');
 const journeyBar = document.getElementById('journey-bar');
@@ -24,8 +27,8 @@ const journeySteps = document.getElementById('journey-steps');
 
 // Init
 async function init() {
-  const result = await chrome.storage.local.get(['multion_api_key', 'journey_state']);
-  state.hasApiKey = !!result.multion_api_key;
+  const result = await chrome.storage.local.get(['supabase_url', 'supabase_anon_key', 'journey_state']);
+  state.hasConfig = !!(result.supabase_url && result.supabase_anon_key);
   if (result.journey_state) {
     state.journey = result.journey_state;
     renderJourney();
@@ -35,7 +38,14 @@ async function init() {
   // Listen for tab changes
   chrome.tabs.onActivated?.addListener(() => updatePageContext());
   chrome.tabs.onUpdated?.addListener((tabId, changeInfo) => {
-    if (changeInfo.status === 'complete') updatePageContext();
+    if (changeInfo.status === 'complete') handlePageChange();
+  });
+
+  // Listen for SPA URL changes from content script
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message.type === 'URL_CHANGED') {
+      handlePageChange();
+    }
   });
 }
 
@@ -43,17 +53,30 @@ function updatePageContext() {
   chrome.runtime.sendMessage({ type: 'GET_PAGE_INFO' }, (response) => {
     if (response?.url) {
       try {
-        const domain = new URL(response.url).hostname;
+        const url = new URL(response.url);
+        const domain = url.hostname;
         pageContext.textContent = domain;
         if (domain !== state.currentDomain && state.currentDomain) {
           addJourneyStep(domain);
         }
+        state.currentUrl = response.url;
         state.currentDomain = domain;
       } catch {
         pageContext.textContent = 'Ready to help';
       }
     }
   });
+}
+
+function handlePageChange() {
+  updatePageContext();
+  // If user has an active goal, auto-analyze the new page
+  setTimeout(() => {
+    if (state.lastGoal && state.hasConfig) {
+      addMessage('assistant', `🔄 Page changed! Analyzing the new page...`);
+      analyzeCurrentPage(state.lastGoal);
+    }
+  }, 1500); // Wait for page to settle
 }
 
 function addJourneyStep(domain) {
@@ -72,7 +95,7 @@ function renderJourney() {
   journeyBar.classList.remove('hidden');
   journeySteps.innerHTML = state.journey.map((step, i) => {
     const isLast = i === state.journey.length - 1;
-    return `<span class="${isLast ? 'text-flame-400 font-medium' : ''}">${step}</span>${!isLast ? '<span class="text-white/20">→</span>' : ''}`;
+    return `<span class="${isLast ? 'text-purple-400 font-medium' : ''}">${step}</span>${!isLast ? '<span class="text-white/20">→</span>' : ''}`;
   }).join('');
 }
 
@@ -83,11 +106,12 @@ settingsBtn.addEventListener('click', () => {
   chatContainerEl.classList.toggle('hidden', !settingsPanel.classList.contains('hidden'));
   inputSection.classList.toggle('hidden', !settingsPanel.classList.contains('hidden'));
   if (isHidden) {
-    chrome.storage.local.get(['multion_api_key'], (result) => {
-      if (result.multion_api_key) {
-        apiKeyInput.value = result.multion_api_key;
-        keyStatus.textContent = '✓ Key saved';
-        keyStatus.className = 'text-xs text-green-400';
+    chrome.storage.local.get(['supabase_url', 'supabase_anon_key'], (result) => {
+      if (result.supabase_url) supabaseUrlInput.value = result.supabase_url;
+      if (result.supabase_anon_key) anonKeyInput.value = result.supabase_anon_key;
+      if (result.supabase_url && result.supabase_anon_key) {
+        configStatus.textContent = '✓ Configuration saved';
+        configStatus.className = 'text-xs text-green-400';
       }
     });
   }
@@ -99,17 +123,18 @@ backBtn.addEventListener('click', () => {
   inputSection.classList.remove('hidden');
 });
 
-saveKeyBtn.addEventListener('click', () => {
-  const key = apiKeyInput.value.trim();
-  if (!key) {
-    keyStatus.textContent = 'Please enter a valid key';
-    keyStatus.className = 'text-xs text-red-400';
+saveConfigBtn.addEventListener('click', () => {
+  const url = supabaseUrlInput.value.trim();
+  const key = anonKeyInput.value.trim();
+  if (!url || !key) {
+    configStatus.textContent = 'Please fill in both fields';
+    configStatus.className = 'text-xs text-red-400';
     return;
   }
-  chrome.storage.local.set({ multion_api_key: key }, () => {
-    state.hasApiKey = true;
-    keyStatus.textContent = '✓ Key saved securely';
-    keyStatus.className = 'text-xs text-green-400';
+  chrome.storage.local.set({ supabase_url: url, supabase_anon_key: key }, () => {
+    state.hasConfig = true;
+    configStatus.textContent = '✓ Configuration saved securely';
+    configStatus.className = 'text-xs text-green-400';
   });
 });
 
@@ -121,55 +146,73 @@ chatForm.addEventListener('submit', async (e) => {
   chatInput.value = '';
 
   addMessage('user', text);
+  state.lastGoal = text;
 
-  if (!state.hasApiKey) {
-    addMessage('assistant', '⚙️ Please set your MultiOn API key first! Click the gear icon in the top-right.');
+  if (!state.hasConfig) {
+    addMessage('assistant', '⚙️ Please configure your backend URL first! Click the gear icon in the top-right.');
     return;
   }
 
-  // Show typing
+  await analyzeCurrentPage(text);
+});
+
+async function analyzeCurrentPage(userMessage) {
   const typingEl = showTyping();
 
+  // Clear previous highlights
+  chrome.runtime.sendMessage({ type: 'CLEAR_HIGHLIGHTS' });
+
   try {
+    // Get current page URL
+    const pageInfo = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'GET_PAGE_INFO' }, resolve);
+    });
+
+    const currentUrl = pageInfo?.url || state.currentUrl;
+    if (!currentUrl || currentUrl.startsWith('chrome://')) {
+      removeTyping(typingEl);
+      addMessage('assistant', '⚠️ I can\'t analyze Chrome internal pages. Please navigate to a website first.');
+      return;
+    }
+
     const response = await new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({
-        type: 'CALL_MULTION',
+        type: 'CALL_GUIDE',
         payload: {
-          cmd: text,
-          url: state.currentDomain ? `https://${state.currentDomain}` : undefined,
-          local: false
+          url: currentUrl,
+          userMessage,
+          pageContext: state.journey.join(' → ')
         }
       }, (res) => {
-        if (res?.error) reject(new Error(res.error === 'NO_API_KEY' ? res.message : res.error));
+        if (res?.error && !res.success) reject(new Error(res.error === 'NO_CONFIG' ? res.message : res.error));
         else resolve(res);
       });
     });
 
     removeTyping(typingEl);
 
-    // Process response - extract element info
     if (response?.message) {
       addMessage('assistant', response.message);
     }
 
-    if (response?.element) {
-      // Highlight the element on the page
+    if (response?.element?.selector) {
       chrome.runtime.sendMessage({
         type: 'HIGHLIGHT_ELEMENT',
         selector: response.element.selector,
-        coordinates: response.element.coordinates,
-        description: response.element.description || 'Click here'
+        description: response.element.description || 'Click here to continue your integration.'
       });
-      addMessage('assistant', `🔶 I've highlighted the element: **${response.element.description || 'target element'}**. Look for the orange glow on the page!`);
-    } else if (response?.status) {
-      addMessage('assistant', `Status: ${response.status}. ${response.url ? `Current page: ${response.url}` : ''}`);
+      addMessage('assistant', `🟣 I've highlighted the **${response.element.description || 'target element'}** on the page. Look for the purple glow!`);
+    }
+
+    if (response?.nextStep) {
+      addMessage('assistant', `📋 **Next up:** ${response.nextStep}`);
     }
 
   } catch (err) {
     removeTyping(typingEl);
     addMessage('assistant', `❌ Error: ${err.message}`);
   }
-});
+}
 
 function addMessage(role, text) {
   state.messages.push({ role, text });
@@ -178,13 +221,13 @@ function addMessage(role, text) {
 
   if (role === 'user') {
     div.innerHTML = `
-      <div class="ml-auto bg-flame-500/20 border border-flame-500/30 rounded-xl rounded-tr-sm px-3 py-2 text-sm text-white/90 max-w-[85%]">
+      <div class="ml-auto bg-purple-500/20 border border-purple-500/30 rounded-xl rounded-tr-sm px-3 py-2 text-sm text-white/90 max-w-[85%]">
         ${escapeHtml(text)}
       </div>
     `;
   } else {
     div.innerHTML = `
-      <div class="w-6 h-6 rounded-full bg-gradient-to-br from-flame-500 to-flame-400 flex items-center justify-center shrink-0 mt-0.5">
+      <div class="w-6 h-6 rounded-full bg-gradient-to-br from-purple-500 to-purple-600 flex items-center justify-center shrink-0 mt-0.5">
         <svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 12h3v8h6v-6h2v6h6v-8h3L12 2z"/></svg>
       </div>
       <div class="bg-navy-700 rounded-xl rounded-tl-sm px-3 py-2 text-sm text-white/90 max-w-[85%]">
@@ -202,7 +245,7 @@ function showTyping() {
   div.className = 'msg-appear flex gap-2.5';
   div.id = 'typing-indicator';
   div.innerHTML = `
-    <div class="w-6 h-6 rounded-full bg-gradient-to-br from-flame-500 to-flame-400 flex items-center justify-center shrink-0 mt-0.5">
+    <div class="w-6 h-6 rounded-full bg-gradient-to-br from-purple-500 to-purple-600 flex items-center justify-center shrink-0 mt-0.5">
       <svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 12h3v8h6v-6h2v6h6v-8h3L12 2z"/></svg>
     </div>
     <div class="bg-navy-700 rounded-xl rounded-tl-sm px-3 py-3 flex gap-1">
@@ -216,9 +259,7 @@ function showTyping() {
   return div;
 }
 
-function removeTyping(el) {
-  el?.remove();
-}
+function removeTyping(el) { el?.remove(); }
 
 function escapeHtml(str) {
   const div = document.createElement('div');
