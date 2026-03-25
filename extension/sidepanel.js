@@ -5,7 +5,8 @@ const state = {
   currentUrl: '',
   currentDomain: '',
   lastGoal: '',
-  firecrawlKey: ''
+  firecrawlKey: '',
+  geminiKey: ''
 };
 
 // DOM
@@ -27,13 +28,15 @@ document.querySelectorAll('.tab').forEach(tab => {
 
 // Settings
 document.getElementById('save-btn').addEventListener('click', () => {
-  const key = document.getElementById('firecrawl-key-input').value.trim();
-  if (!key) {
-    showStatus('Please enter your API key', false);
+  const fcKey = document.getElementById('firecrawl-key-input').value.trim();
+  const gmKey = document.getElementById('gemini-key-input').value.trim();
+  if (!fcKey || !gmKey) {
+    showStatus('Both API keys are required', false);
     return;
   }
-  chrome.storage.local.set({ firecrawl_key: key }, () => {
-    state.firecrawlKey = key;
+  chrome.storage.local.set({ firecrawl_key: fcKey, gemini_key: gmKey }, () => {
+    state.firecrawlKey = fcKey;
+    state.geminiKey = gmKey;
     showStatus('Settings saved securely ✓', true);
   });
 });
@@ -41,9 +44,11 @@ document.getElementById('save-btn').addEventListener('click', () => {
 document.getElementById('clear-btn').addEventListener('click', () => {
   chrome.storage.local.clear(() => {
     state.firecrawlKey = '';
+    state.geminiKey = '';
     state.messages = [];
     state.journey = [];
     document.getElementById('firecrawl-key-input').value = '';
+    document.getElementById('gemini-key-input').value = '';
     chatMessages.innerHTML = '';
     chatMessages.appendChild(welcomeScreen);
     welcomeScreen.style.display = 'flex';
@@ -62,11 +67,11 @@ function showStatus(msg, ok) {
 
 // Init
 async function init() {
-  const result = await chrome.storage.local.get(['firecrawl_key', 'journey_state', 'chat_history']);
+  const result = await chrome.storage.local.get(['firecrawl_key', 'gemini_key', 'journey_state', 'chat_history']);
   state.firecrawlKey = result.firecrawl_key || '';
-  if (result.firecrawl_key) {
-    document.getElementById('firecrawl-key-input').value = result.firecrawl_key;
-  }
+  state.geminiKey = result.gemini_key || '';
+  if (result.firecrawl_key) document.getElementById('firecrawl-key-input').value = result.firecrawl_key;
+  if (result.gemini_key) document.getElementById('gemini-key-input').value = result.gemini_key;
   if (result.journey_state) {
     state.journey = result.journey_state;
     renderJourney();
@@ -103,10 +108,13 @@ function updatePageContext() {
 }
 
 function handlePageChange() {
+  const prevDomain = state.currentDomain;
   updatePageContext();
   setTimeout(() => {
-    if (state.lastGoal && state.firecrawlKey) {
-      addMessage('assistant', '🔄 Page changed — analyzing...');
+    if (state.currentDomain && state.currentDomain !== prevDomain) {
+      addMessage('assistant', `🌐 I see we've moved to **${state.currentDomain}**. Ready for the next step of the integration?`);
+    }
+    if (state.lastGoal && state.firecrawlKey && state.geminiKey) {
       analyzeCurrentPage(state.lastGoal);
     }
   }, 1500);
@@ -136,9 +144,9 @@ chatForm.addEventListener('submit', async (e) => {
   if (!text) return;
   chatInput.value = '';
 
-  if (!state.firecrawlKey) {
+  if (!state.firecrawlKey || !state.geminiKey) {
     addMessage('user', text);
-    addMessage('assistant', '⚙️ Please add your Firecrawl API key in the **Settings** tab first.');
+    addMessage('assistant', '⚙️ Please add both your **Firecrawl** and **Gemini** API keys in the **Settings** tab first.');
     return;
   }
 
@@ -166,8 +174,8 @@ async function analyzeCurrentPage(userMessage) {
 
     const response = await new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({
-        type: 'SCRAPE_AND_GUIDE',
-        payload: { url, userMessage, pageContext: state.journey.join(' → '), firecrawlKey: state.firecrawlKey }
+        type: 'ANALYZE_PAGE',
+        payload: { url, userMessage, firecrawlKey: state.firecrawlKey, geminiKey: state.geminiKey }
       }, (res) => {
         if (res?.error && !res.success) reject(new Error(res.error));
         else resolve(res);
@@ -176,22 +184,34 @@ async function analyzeCurrentPage(userMessage) {
 
     removeEl(typingEl);
 
-    if (response?.message) addMessage('assistant', response.message);
-    if (response?.element?.selector) {
+    if (!response) return;
+
+    const conf = response.confidence || 0;
+    const confClass = conf >= 0.7 ? 'confidence-high' : conf >= 0.4 ? 'confidence-med' : 'confidence-low';
+    const confLabel = conf >= 0.7 ? 'HIGH' : conf >= 0.4 ? 'MED' : 'LOW';
+
+    // Show result
+    let msg = '';
+    if (conf >= 0.7) {
+      msg = `🎯 Found **"${response.elementLabel}"** on **${response.pageTitle || 'this page'}**.\n\n${response.description}\n\n<span class="confidence-badge ${confClass}">${confLabel} ${Math.round(conf * 100)}%</span>`;
+    } else if (conf > 0) {
+      msg = `🤔 I think it's **"${response.elementLabel}"**, but I'm not certain. Is this the right one?\n\n${response.description}\n\n<span class="confidence-badge ${confClass}">${confLabel} ${Math.round(conf * 100)}%</span>`;
+    } else {
+      msg = `❓ I couldn't confidently identify the element. ${response.description}`;
+    }
+    addMessage('assistant', msg);
+
+    // Draw ghost mouse if we have coordinates
+    if (conf > 0 && response.x != null && response.y != null) {
       chrome.runtime.sendMessage({
-        type: 'HIGHLIGHT_ELEMENT',
-        selector: response.element.selector,
-        description: response.element.description || 'Click here to continue.'
+        type: 'HIGHLIGHT_AT',
+        xPct: response.x,
+        yPct: response.y,
+        description: response.description || 'Click here to continue.'
       });
+      addMessage('assistant', '🟠 I\'ve placed a **ghost marker** on the page where you should click.');
     }
-    if (response?.alternatives?.length) {
-      response.alternatives.forEach((alt, i) => {
-        addMessage('assistant', `${i === 0 ? '🔹' : '🔸'} Alt: **${alt.description}** — say "try ${i + 2}" to highlight it instead.`);
-      });
-    }
-    if (response?.nextStep) {
-      addMessage('assistant', `📋 **Next:** ${response.nextStep}`);
-    }
+
   } catch (err) {
     removeEl(typingEl);
     addMessage('assistant', `❌ ${err.message}`);
@@ -203,7 +223,7 @@ function addMessage(role, text, silent) {
 
   state.messages.push({ role, text });
   if (!silent) {
-    chrome.storage.local.set({ chat_history: state.messages.slice(-50) }); // keep last 50
+    chrome.storage.local.set({ chat_history: state.messages.slice(-50) });
   }
 
   const div = document.createElement('div');
@@ -241,10 +261,13 @@ function showTyping() {
 function removeEl(el) { el?.remove(); }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function formatMd(t) {
-  return esc(t)
+  return t
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/&lt;span class=&quot;(.*?)&quot;&gt;(.*?)&lt;\/span&gt;/g, '<span class="$1">$2</span>')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.*?)\*/g, '<em>$1</em>')
-    .replace(/`(.*?)`/g, '<code>$1</code>');
+    .replace(/`(.*?)`/g, '<code>$1</code>')
+    .replace(/\n/g, '<br/>');
 }
 
 init();

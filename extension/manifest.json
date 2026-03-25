@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Integration Guide",
-  "version": "2.0.0",
-  "description": "100% local-first AI integration guide. Your data never leaves your browser.",
+  "version": "3.0.0",
+  "description": "AI-powered integration guide using Gemini Vision + Firecrawl. 100% local-first.",
   "permissions": ["sidePanel", "storage", "activeTab", "scripting", "tabs"],
-  "host_permissions": ["https://api.firecrawl.dev/*"],
+  "host_permissions": ["<all_urls>"],
   "action": {
     "default_icon": "icon.png",
     "default_title": "Open Integration Guide"
