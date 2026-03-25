@@ -11,7 +11,7 @@
         extend: {
           colors: {
             navy: { 50: '#eef2ff', 100: '#e0e7ff', 500: '#1a1a2e', 600: '#16162a', 700: '#121226', 800: '#0e0e20', 900: '#0a0a18' },
-            flame: { 400: '#ffb347', 500: '#ff8c00', 600: '#e07b00' }
+            purple: { 400: '#a78bfa', 500: '#9333ea', 600: '#7c3aed' }
           }
         }
       }
@@ -35,7 +35,7 @@
 
   <!-- Header -->
   <header class="flex items-center gap-3 px-4 py-3 border-b border-white/10 shrink-0">
-    <div class="w-8 h-8 bg-gradient-to-br from-flame-500 to-flame-400 rounded-lg flex items-center justify-center">
+    <div class="w-8 h-8 bg-gradient-to-br from-purple-500 to-purple-600 rounded-lg flex items-center justify-center">
       <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 12h3v8h6v-6h2v6h6v-8h3L12 2z"/></svg>
     </div>
     <div class="flex-1">
@@ -54,29 +54,34 @@
 
   <!-- Settings Panel (hidden by default) -->
   <div id="settings-panel" class="hidden flex-1 flex flex-col px-4 py-4 gap-4">
-    <h2 class="text-sm font-semibold">Settings</h2>
+    <h2 class="text-sm font-semibold">Backend Configuration</h2>
     <div>
-      <label class="text-xs text-white/60 block mb-1.5">MultiOn API Key</label>
-      <input type="password" id="api-key-input" placeholder="Enter your API key..."
-        class="w-full bg-navy-700 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-flame-500 transition-colors" />
+      <label class="text-xs text-white/60 block mb-1.5">Supabase URL</label>
+      <input type="url" id="supabase-url-input" placeholder="https://your-project.supabase.co"
+        class="w-full bg-navy-700 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-purple-500 transition-colors" />
     </div>
-    <button id="save-key-btn" class="bg-flame-500 hover:bg-flame-600 text-white text-sm font-medium py-2 px-4 rounded-lg transition-colors">
-      Save Key
+    <div>
+      <label class="text-xs text-white/60 block mb-1.5">Supabase Anon Key</label>
+      <input type="password" id="anon-key-input" placeholder="Enter your anon/publishable key..."
+        class="w-full bg-navy-700 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-purple-500 transition-colors" />
+    </div>
+    <button id="save-config-btn" class="bg-purple-500 hover:bg-purple-600 text-white text-sm font-medium py-2 px-4 rounded-lg transition-colors">
+      Save Configuration
     </button>
-    <p id="key-status" class="text-xs text-white/40"></p>
+    <p id="config-status" class="text-xs text-white/40"></p>
     <button id="back-btn" class="text-xs text-white/40 hover:text-white/70 mt-2 transition-colors">← Back to chat</button>
   </div>
 
   <!-- Chat Messages -->
   <div id="chat-container" class="flex-1 overflow-y-auto px-4 py-4 space-y-3">
     <div class="msg-appear flex gap-2.5">
-      <div class="w-6 h-6 rounded-full bg-gradient-to-br from-flame-500 to-flame-400 flex items-center justify-center shrink-0 mt-0.5">
+      <div class="w-6 h-6 rounded-full bg-gradient-to-br from-purple-500 to-purple-600 flex items-center justify-center shrink-0 mt-0.5">
         <svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 12h3v8h6v-6h2v6h6v-8h3L12 2z"/></svg>
       </div>
       <div class="bg-navy-700 rounded-xl rounded-tl-sm px-3 py-2 text-sm text-white/90 max-w-[85%]">
         <p>👋 Hey! I'm your <strong>Integration Guide</strong>.</p>
-        <p class="mt-1.5 text-white/60 text-xs">Tell me what you want to connect — like <em>"Help me sync HubSpot"</em> — and I'll walk you through it step by step, highlighting exactly where to click.</p>
-        <p class="mt-1.5 text-white/50 text-xs">⚙️ First, set your MultiOn API key in settings.</p>
+        <p class="mt-1.5 text-white/60 text-xs">Tell me what you want to connect — like <em>"Help me sync HubSpot"</em> — and I'll read the page with AI and highlight exactly where to click.</p>
+        <p class="mt-1.5 text-white/50 text-xs">⚙️ First, configure your backend URL in settings (gear icon).</p>
       </div>
     </div>
   </div>
@@ -85,8 +90,8 @@
   <div class="px-4 py-3 border-t border-white/10 shrink-0">
     <form id="chat-form" class="flex gap-2">
       <input type="text" id="chat-input" placeholder="e.g. Help me sync HubSpot..."
-        class="flex-1 bg-navy-700 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-white/30 focus:outline-none focus:border-flame-500 transition-colors" />
-      <button type="submit" class="bg-flame-500 hover:bg-flame-600 text-white p-2.5 rounded-xl transition-colors shrink-0">
+        class="flex-1 bg-navy-700 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-white/30 focus:outline-none focus:border-purple-500 transition-colors" />
+      <button type="submit" class="bg-purple-500 hover:bg-purple-600 text-white p-2.5 rounded-xl transition-colors shrink-0">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
       </button>
     </form>

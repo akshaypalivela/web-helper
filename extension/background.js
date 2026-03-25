@@ -1,7 +1,7 @@
 // Open side panel when extension icon is clicked
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
-// Listen for messages from the side panel
+// Listen for messages from the side panel and content scripts
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'HIGHLIGHT_ELEMENT') {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -11,10 +11,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           selector: message.selector,
           coordinates: message.coordinates,
           description: message.description
-        });
+        }, sendResponse);
       }
     });
-    sendResponse({ success: true });
+    return true;
   }
 
   if (message.type === 'CLEAR_HIGHLIGHTS') {
@@ -32,36 +32,44 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ url: tabs[0].url, title: tabs[0].title });
       }
     });
-    return true; // async
+    return true;
   }
 
-  if (message.type === 'CALL_MULTION') {
-    callMultiOn(message.payload).then(sendResponse).catch(err => {
-      sendResponse({ error: err.message });
+  if (message.type === 'URL_CHANGED') {
+    // Forward URL change from content script to sidepanel
+    // The sidepanel listens for this via onMessage
+  }
+
+  if (message.type === 'CALL_GUIDE') {
+    callGuideFunction(message.payload).then(sendResponse).catch(err => {
+      sendResponse({ success: false, error: err.message });
     });
-    return true; // async
+    return true;
   }
 });
 
-async function callMultiOn(payload) {
-  const result = await chrome.storage.local.get(['multion_api_key']);
-  const apiKey = result.multion_api_key;
-  if (!apiKey) {
-    return { error: 'NO_API_KEY', message: 'Please set your MultiOn API key in the settings.' };
+async function callGuideFunction(payload) {
+  const result = await chrome.storage.local.get(['supabase_url', 'supabase_anon_key']);
+  const supabaseUrl = result.supabase_url;
+  const anonKey = result.supabase_anon_key;
+
+  if (!supabaseUrl || !anonKey) {
+    return { success: false, error: 'NO_CONFIG', message: 'Please configure your backend URL in settings.' };
   }
 
-  const response = await fetch('https://api.multion.ai/v1/browse', {
+  const response = await fetch(`${supabaseUrl}/functions/v1/integration-guide`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
+      'Authorization': `Bearer ${anonKey}`,
+      'apikey': anonKey,
     },
     body: JSON.stringify(payload)
   });
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`MultiOn API error [${response.status}]: ${text}`);
+    throw new Error(`Guide API error [${response.status}]: ${text}`);
   }
 
   return await response.json();

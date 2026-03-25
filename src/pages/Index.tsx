@@ -26,7 +26,7 @@ const features = [
   {
     icon: Eye,
     title: "Visual Highlights",
-    description: "Elements you need to click get a pulsing orange glow — never guess where to look."
+    description: "Elements you need to click get a pulsing purple glow with an AI tip bubble."
   },
   {
     icon: Compass,
@@ -35,8 +35,8 @@ const features = [
   },
   {
     icon: Zap,
-    title: "MultiOn Powered",
-    description: "Uses AI to understand page structure and find the exact buttons and fields you need."
+    title: "Firecrawl Powered",
+    description: "Scrapes pages with screenshot + markdown, then AI identifies the exact element to click."
   }
 ];
 
@@ -118,7 +118,7 @@ const Index = () => {
 
       {/* Footer */}
       <footer className="border-t border-border py-8 text-center text-xs text-muted-foreground">
-        Integration Guide · Powered by MultiOn AI
+        Integration Guide · Powered by Firecrawl + AI
       </footer>
     </div>
   );
