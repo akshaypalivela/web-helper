@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Integration Guide",
+  "version": "1.0.0",
+  "description": "AI-powered integration guide that helps you navigate and connect tools using MultiOn",
+  "permissions": ["sidePanel", "storage", "activeTab", "scripting"],
+  "action": {
+    "default_icon": "icon.png",
+    "default_title": "Open Integration Guide"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content-styles.css"]
+    }
+  ],
+  "icons": {
+    "48": "icon.png",
+    "128": "icon.png"
+  }
+}
