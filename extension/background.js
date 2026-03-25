@@ -1,3 +1,18 @@
+// Helper: convert image URL to raw base64 string
+async function imageUrlToBase64(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Failed to fetch screenshot: ${response.status}`);
+  const blob = await response.blob();
+  if (blob.type.includes('text/html')) throw new Error('Expected image but got text/html');
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 // Open side panel when extension icon is clicked
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
