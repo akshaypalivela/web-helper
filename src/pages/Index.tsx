@@ -18,10 +18,10 @@ const downloadExtension = () => {
 };
 
 const features = [
-  { icon: MessageSquare, title: "Natural Language Chat", description: "Describe what you want to integrate — it guides you step by step." },
-  { icon: Eye, title: "Visual Highlights", description: "Elements you need to click get a pulsing purple glow with an AI tip." },
+  { icon: MessageSquare, title: "Natural Language Chat", description: "Describe what you want to integrate — Gemini Vision analyzes the page and guides you." },
+  { icon: Eye, title: "Ghost Mouse", description: "A pulsing orange marker appears on the exact button you need to click next." },
   { icon: Compass, title: "Cross-Domain Journey", description: "Tracks progress as you navigate between tools and services." },
-  { icon: Zap, title: "Firecrawl Powered", description: "Scrapes pages with screenshot + markdown to identify the exact element." },
+  { icon: Zap, title: "Gemini + Firecrawl", description: "Screenshots the page with Firecrawl, then Gemini Vision identifies the right element." },
   { icon: Lock, title: "100% Local-First", description: "Your API keys and data never leave your browser. No external servers." },
 ];
 
@@ -29,7 +29,7 @@ const steps = [
   { num: "01", text: "Download & unzip the extension" },
   { num: "02", text: "Open chrome://extensions and enable Developer Mode" },
   { num: "03", text: "Click 'Load unpacked' and select the folder" },
-  { num: "04", text: "Add your Firecrawl API key in the Settings tab" },
+  { num: "04", text: "Add your Firecrawl + Gemini API keys in Settings" },
 ];
 
 const Index = () => {
@@ -98,7 +98,7 @@ const Index = () => {
       </section>
 
       <footer className="border-t border-border py-8 text-center text-xs text-muted-foreground">
-        Integration Guide · 100% Local-First · Powered by Firecrawl
+        Integration Guide · 100% Local-First · Powered by Gemini + Firecrawl
       </footer>
     </div>
   );

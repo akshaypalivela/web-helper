@@ -1,29 +1,10 @@
-// Content script for highlighting elements on the page
+// Content script: ghost mouse + AI tip bubble
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'HIGHLIGHT') {
+  if (message.type === 'HIGHLIGHT_AT') {
     clearAllHighlights();
-
-    if (message.selector) {
-      const el = document.querySelector(message.selector);
-      if (el) {
-        highlightElement(el, message.description);
-        sendResponse({ success: true, found: true });
-        return;
-      }
-    }
-
-    if (message.coordinates) {
-      const { x, y } = message.coordinates;
-      const el = document.elementFromPoint(x, y);
-      if (el) {
-        highlightElement(el, message.description);
-        sendResponse({ success: true, found: true });
-        return;
-      }
-    }
-
-    sendResponse({ success: true, found: false });
+    drawGhostMouse(message.xPct, message.yPct, message.description);
+    sendResponse({ success: true });
   }
 
   if (message.type === 'CLEAR_HIGHLIGHTS') {
@@ -46,29 +27,39 @@ const urlObserver = new MutationObserver(() => {
 });
 urlObserver.observe(document.body, { childList: true, subtree: true });
 
-function highlightElement(el, description) {
-  el.classList.add('ig-highlight');
+function drawGhostMouse(xPct, yPct, description) {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const x = (xPct / 100) * vw;
+  const y = (yPct / 100) * vh;
 
-  // Create AI tip bubble
+  // Ghost mouse circle
+  const circle = document.createElement('div');
+  circle.className = 'ig-ghost-mouse';
+  circle.style.left = `${x}px`;
+  circle.style.top = `${y}px`;
+  document.body.appendChild(circle);
+
+  // AI Tip bubble
   const tip = document.createElement('div');
   tip.className = 'ig-tip-bubble';
   tip.textContent = description || 'Click here to continue your integration.';
-
-  const rect = el.getBoundingClientRect();
+  
+  // Position tip above the circle
   tip.style.position = 'fixed';
-  tip.style.top = `${Math.max(8, rect.top - 44)}px`;
-  tip.style.left = `${rect.left}px`;
+  tip.style.left = `${Math.max(8, x - 80)}px`;
+  tip.style.top = `${Math.max(8, y - 60)}px`;
   tip.style.zIndex = '2147483647';
-
   document.body.appendChild(tip);
 
-  // Scroll into view
-  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // Scroll the area into view
+  window.scrollTo({
+    top: window.scrollY + y - vh / 2,
+    behavior: 'smooth'
+  });
 }
 
 function clearAllHighlights() {
-  document.querySelectorAll('.ig-highlight').forEach(el => {
-    el.classList.remove('ig-highlight');
-  });
+  document.querySelectorAll('.ig-ghost-mouse').forEach(el => el.remove());
   document.querySelectorAll('.ig-tip-bubble').forEach(el => el.remove());
 }
