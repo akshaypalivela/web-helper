@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Integration Guide",
   "version": "3.0.0",
-  "description": "AI-powered integration guide using Gemini Vision + Firecrawl. 100% local-first.",
+  "description": "AI-powered integration guide: Gemini Vision on your live tab, optional Firecrawl fallback.",
   "permissions": ["sidePanel", "storage", "activeTab", "scripting", "tabs"],
   "host_permissions": ["<all_urls>", "https://storage.googleapis.com/*"],
   "action": {

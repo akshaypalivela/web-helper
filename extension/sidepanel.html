@@ -277,7 +277,7 @@
         </div>
         <h2>Integration Guide</h2>
         <p>Describe a multi-step goal (e.g. make a repo private) — I’ll show one click at a time. Use <strong>Next step</strong> after each action.</p>
-        <p style="font-size:11px;color:var(--text-dim)">Add your <strong>Firecrawl</strong> and <strong>Gemini</strong> API keys in Settings to begin.</p>
+        <p style="font-size:11px;color:var(--text-dim)">Add your <strong>Gemini</strong> API key in Settings to begin. Firecrawl is optional (fallback if this tab can’t be captured).</p>
       </div>
     </div>
     <div class="chat-input-area">
@@ -293,9 +293,9 @@
   <div class="panel" id="panel-settings">
     <div class="settings-content">
       <div class="setting-group">
-        <label class="setting-label">Firecrawl API Key</label>
-        <input type="password" class="setting-input" id="firecrawl-key-input" placeholder="fc-..." />
-        <p style="font-size:10px;color:var(--text-dim)">Get your key at <a href="https://firecrawl.dev" target="_blank" style="color:var(--accent);text-decoration:none">firecrawl.dev</a></p>
+        <label class="setting-label">Firecrawl API Key (optional)</label>
+        <input type="password" class="setting-input" id="firecrawl-key-input" placeholder="fc-... (optional)" />
+        <p style="font-size:10px;color:var(--text-dim)">Only used when the live tab can’t be captured. <a href="https://firecrawl.dev" target="_blank" style="color:var(--accent);text-decoration:none">firecrawl.dev</a></p>
       </div>
       <div class="setting-group">
         <label class="setting-label">Google Gemini API Key</label>

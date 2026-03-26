@@ -9,6 +9,17 @@ if (!window.__integrationGuideListeners) {
       return true;
     }
 
+    if (message.type === 'GET_CLICKABLE_CANDIDATES') {
+      try {
+        const text = formatClickableCandidatesForPrompt();
+        const count = getOrderedViewportClickables(IG_MAX_CANDIDATES).length;
+        sendResponse({ text, count });
+      } catch (e) {
+        sendResponse({ text: '', count: 0, error: String(e?.message || e) });
+      }
+      return true;
+    }
+
     if (message.type === 'HIGHLIGHT_AT') {
       try {
         clearAllHighlights();
@@ -17,7 +28,8 @@ if (!window.__integrationGuideListeners) {
           message.yPct,
           message.description,
           message.elementLabel,
-          message.intentText || ''
+          message.intentText || '',
+          message.candidateIndex
         );
         sendResponse({ success: true });
       } catch (e) {
@@ -236,6 +248,49 @@ function collectClickableCandidates(options = {}) {
     out.push({ el, r, text, aria, title });
   });
   return out;
+}
+
+const IG_MAX_CANDIDATES = 80;
+
+/** Stable reading order for DOM-first highlights; must match GET_CLICKABLE_CANDIDATES / model list. */
+function getOrderedViewportClickables(max = IG_MAX_CANDIDATES) {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const raw = collectClickableCandidates({ visibleOnly: true });
+  const items = raw.map((c) => {
+    const label = [c.text, c.aria, c.title]
+      .filter(Boolean)
+      .join(' | ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 56);
+    const cx = c.r.left + c.r.width / 2;
+    const cy = c.r.top + c.r.height / 2;
+    const role = c.el.getAttribute('role') || c.el.tagName.toLowerCase();
+    return { el: c.el, r: c.r, label: label || role, role, cx, cy, vw, vh };
+  });
+  items.sort((a, b) => {
+    if (Math.abs(a.r.top - b.r.top) > 2) return a.r.top - b.r.top;
+    return a.r.left - b.r.left;
+  });
+  return items.slice(0, max);
+}
+
+function getClickableElementByStableIndex(index) {
+  const list = getOrderedViewportClickables(IG_MAX_CANDIDATES);
+  if (index >= 0 && index < list.length) return list[index].el;
+  return null;
+}
+
+function formatClickableCandidatesForPrompt() {
+  const lines = getOrderedViewportClickables(IG_MAX_CANDIDATES);
+  return lines
+    .map((item, i) => {
+      const xPct = Math.round((item.cx / item.vw) * 100);
+      const yPct = Math.round((item.cy / item.vh) * 100);
+      return `${i}\t${item.role}\t"${item.label}"\t~${xPct}%,${yPct}%`;
+    })
+    .join('\n');
 }
 
 function rectVisibleRatio(r, vw, vh) {
@@ -574,7 +629,7 @@ function clampPct(v, fallback) {
   return Math.max(0, Math.min(100, n));
 }
 
-function drawGhostMouse(xPct, yPct, description, elementLabel, intentText) {
+function drawGhostMouse(xPct, yPct, description, elementLabel, intentText, candidateIndex) {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const xp = clampPct(xPct, 8);
@@ -582,13 +637,26 @@ function drawGhostMouse(xPct, yPct, description, elementLabel, intentText) {
   const vx = (xp / 100) * vw;
   const vy = (yp / 100) * vh;
 
-  const { target: resolved, matchedForScroll } = resolveHighlightTarget(
-    elementLabel,
-    intentText,
-    vx,
-    vy
-  );
-  let target = resolved;
+  let target = null;
+  let matchedForScroll = false;
+
+  const ci =
+    candidateIndex === undefined || candidateIndex === null || candidateIndex === ''
+      ? NaN
+      : Number(candidateIndex);
+  if (Number.isFinite(ci) && ci >= 0) {
+    const byIdx = getClickableElementByStableIndex(ci);
+    if (byIdx) {
+      target = byIdx;
+      matchedForScroll = true;
+    }
+  }
+
+  if (!target) {
+    const resolved = resolveHighlightTarget(elementLabel, intentText, vx, vy);
+    target = resolved.target;
+    matchedForScroll = resolved.matchedForScroll;
+  }
   if (!target) {
     const rawHit = document.elementFromPoint(
       Math.max(0, Math.min(vw - 1, vx)),
@@ -651,7 +719,8 @@ window.__integrationGuideDraw = function igDraw(payload) {
       payload.yPct,
       payload.description || '',
       payload.elementLabel || '',
-      payload.intentText || ''
+      payload.intentText || '',
+      payload.candidateIndex
     );
   } catch (e) {
     console.error('[Integration Guide] __integrationGuideDraw', e);

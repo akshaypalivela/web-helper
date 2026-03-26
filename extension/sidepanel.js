@@ -48,6 +48,64 @@ function syncGuidanceEpochToStorage() {
   } catch (_) {}
 }
 
+function igLog(label, data) {
+  console.info('[IntegrationGuide]', label, data);
+}
+
+/** Smaller JPEG for Gemini multimodal (faster upload). */
+function downscaleDataUrlForGemini(dataUrl, maxWidth = 1280, quality = 0.82) {
+  if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image')) {
+    return Promise.resolve(dataUrl);
+  }
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        let w = img.naturalWidth;
+        let h = img.naturalHeight;
+        if (!w || !h) {
+          resolve(dataUrl);
+          return;
+        }
+        if (w <= maxWidth) {
+          resolve(dataUrl);
+          return;
+        }
+        const scale = maxWidth / w;
+        w = Math.round(maxWidth);
+        h = Math.round(h * scale);
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext('2d');
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(c.toDataURL('image/jpeg', quality));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+function getClickableCandidatesFromTab(tabId) {
+  return new Promise((resolve) => {
+    if (!tabId) {
+      resolve({ text: '' });
+      return;
+    }
+    chrome.tabs.sendMessage(tabId, { type: 'GET_CLICKABLE_CANDIDATES' }, (res) => {
+      if (chrome.runtime.lastError) resolve({ text: '' });
+      else resolve(res || { text: '' });
+    });
+  });
+}
+
 // DOM
 const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
@@ -69,8 +127,8 @@ document.querySelectorAll('.tab').forEach(tab => {
 document.getElementById('save-btn').addEventListener('click', () => {
   const fcKey = document.getElementById('firecrawl-key-input').value.trim();
   const gmKey = document.getElementById('gemini-key-input').value.trim();
-  if (!fcKey || !gmKey) {
-    showStatus('Both API keys are required', false);
+  if (!gmKey) {
+    showStatus('Gemini API key is required', false);
     return;
   }
   chrome.storage.local.set({ firecrawl_key: fcKey, gemini_key: gmKey }, () => {
@@ -119,8 +177,8 @@ document.getElementById('clear-btn').addEventListener('click', () => {
 });
 
 document.getElementById('next-step-btn').addEventListener('click', async () => {
-  if (!state.guidanceGoal || !state.firecrawlKey || !state.geminiKey) {
-    showStatus('Add keys and type a goal in chat first', false);
+  if (!state.guidanceGoal || !state.geminiKey) {
+    showStatus('Add your Gemini key and type a goal in chat first', false);
     return;
   }
   state.pauseAutoAnalysis = false;
@@ -157,8 +215,8 @@ document.getElementById('reset-guidance-btn').addEventListener('click', () => {
 });
 
 document.getElementById('continue-here-btn').addEventListener('click', async () => {
-  if (!state.guidanceGoal || !state.firecrawlKey || !state.geminiKey) {
-    showStatus('Add keys and a goal first', false);
+  if (!state.guidanceGoal || !state.geminiKey) {
+    showStatus('Add your Gemini key and a goal first', false);
     return;
   }
   const tabs = await new Promise((resolve) => {
@@ -250,6 +308,10 @@ async function deliverHighlight(tabId, response) {
     elementLabel: response.elementLabel || '',
     intentText: state.guidanceGoal || state.lastGoal || '',
   };
+  const ci = Number(response.candidateIndex);
+  if (Number.isFinite(ci) && ci >= 0) {
+    payload.candidateIndex = ci;
+  }
   await new Promise((resolve) => {
     chrome.tabs.sendMessage(tabId, { type: 'CLEAR_HIGHLIGHTS' }, () => resolve());
   });
@@ -480,7 +542,7 @@ function scheduleGuidanceFollowUp() {
   navigateDebounce = setTimeout(() => {
     navigateDebounce = null;
     if (epoch !== state.guidanceEpoch) return;
-    if (!state.lastGoal || !state.firecrawlKey || !state.geminiKey) return;
+    if (!state.lastGoal || !state.geminiKey) return;
     if (state.pauseAutoAnalysis || state.awaitingContextChoice || state.stickyManualPause) return;
     if (state.taskCompletionPaused) return;
     if (state.analyzeInFlight > 0) return;
@@ -507,7 +569,7 @@ function scheduleDomGuidanceFollowUp(fromInteraction) {
   navigateDebounce = setTimeout(() => {
     navigateDebounce = null;
     if (epoch !== state.guidanceEpoch) return;
-    if (!state.lastGoal || !state.firecrawlKey || !state.geminiKey) return;
+    if (!state.lastGoal || !state.geminiKey) return;
     if (state.pauseAutoAnalysis || state.awaitingContextChoice || state.stickyManualPause) return;
     if (state.taskCompletionPaused) return;
     if (state.analyzeInFlight > 0) return;
@@ -588,9 +650,9 @@ chatForm.addEventListener('submit', async (e) => {
   if (!text) return;
   chatInput.value = '';
 
-  if (!state.firecrawlKey || !state.geminiKey) {
+  if (!state.geminiKey) {
     addMessage('user', text);
-    addMessage('assistant', '⚙️ Please add both your **Firecrawl** and **Gemini** API keys in the **Settings** tab first.');
+    addMessage('assistant', '⚙️ Add your **Gemini** API key in **Settings**. A Firecrawl key is optional (only if live tab capture fails).');
     return;
   }
 
@@ -682,41 +744,47 @@ async function analyzeCurrentPage(userMessage) {
     }
     let clientScreenshot;
     let pageText = '';
+    let clickableCandidatesText = '';
     const canCapture =
       activeTab?.id &&
       !url.startsWith('chrome://') &&
       !url.startsWith('chrome-extension://') &&
       !url.startsWith('edge://');
 
+    const tCapture0 = performance.now();
     if (canCapture) {
       try {
         const capWindowId = activeTab.windowId;
-        const [dataUrl, textPayload] = await Promise.all([
-          new Promise((resolve, reject) => {
-            chrome.tabs.captureVisibleTab(capWindowId, { format: 'png' }, (dataUrl) => {
-              if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-              else resolve(dataUrl);
-            });
-          }),
+        const dataUrl = await new Promise((resolve, reject) => {
+          chrome.tabs.captureVisibleTab(capWindowId, { format: 'png' }, (du) => {
+            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+            else resolve(du);
+          });
+        });
+        const [textPayload, candRes] = await Promise.all([
           new Promise((resolve) => {
             chrome.tabs.sendMessage(activeTab.id, { type: 'GET_PAGE_TEXT' }, (res) => {
               if (chrome.runtime.lastError) resolve({ text: '' });
               else resolve(res || { text: '' });
             });
           }),
+          getClickableCandidatesFromTab(activeTab.id),
         ]);
-        clientScreenshot = dataUrl;
         pageText = textPayload?.text || '';
+        clickableCandidatesText = candRes?.text || '';
+        clientScreenshot = await downscaleDataUrlForGemini(dataUrl);
       } catch {
         clientScreenshot = undefined;
       }
     }
+    const captureMs = performance.now() - tCapture0;
 
     if (runEpoch !== state.guidanceEpoch) {
       removeEl(typingEl);
       return;
     }
 
+    const tAnalyze0 = performance.now();
     const response = await new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({
         type: 'ANALYZE_PAGE',
@@ -728,11 +796,19 @@ async function analyzeCurrentPage(userMessage) {
           clientScreenshot,
           pageText,
           pageTitle: pageInfo?.title || activeTab?.title || '',
+          clickableCandidatesText,
         },
       }, (res) => {
         if (res?.error && !res.success) reject(new Error(res.error));
         else resolve(res);
       });
+    });
+    const analyzeWallMs = performance.now() - tAnalyze0;
+    igLog('timings', {
+      captureMs: Math.round(captureMs),
+      analyzeMs: Math.round(analyzeWallMs),
+      ...(response?.timings || {}),
+      usedRemoteScrape: Boolean(response?.usedRemoteScrape),
     });
 
     removeEl(typingEl);
@@ -779,6 +855,10 @@ async function analyzeCurrentPage(userMessage) {
     if (conf > 0 && (state.guidanceStepsDone.length > 1 || response.isMultiStep)) {
       msg += `\n\n_Tap **Next step** in the bar above after you perform this action._`;
     }
+    if (response.usedRemoteScrape) {
+      msg +=
+        '\n\n_Using a **server snapshot** of the page — it may not match your logged-in tab._';
+    }
     addMessage('assistant', msg);
 
     if (
@@ -805,7 +885,9 @@ async function analyzeCurrentPage(userMessage) {
         Number.isFinite(Number(response.y)));
 
     if (shouldTryHighlight && activeTab?.id && runEpoch === state.guidanceEpoch) {
+      const tHl0 = performance.now();
       const hl = await deliverHighlight(activeTab.id, response);
+      igLog('highlight', { ms: Math.round(performance.now() - tHl0), ok: hl.ok });
       if (runEpoch !== state.guidanceEpoch) return;
       if (hl.ok) {
         addMessage('assistant', '🟠 I\'ve placed a **ghost marker** on the page where you should click.');

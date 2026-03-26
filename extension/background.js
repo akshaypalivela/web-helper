@@ -105,6 +105,7 @@ function buildFallbackGuideFromRawText(rawText) {
     isMultiStep: false,
     overallPlan: '',
     stepSummary: '',
+    candidateIndex: -1,
     usedFallback: true,
   };
 }
@@ -127,8 +128,22 @@ const GUIDE_RESPONSE_SCHEMA = {
     isMultiStep: { type: 'BOOLEAN' },
     overallPlan: { type: 'STRING' },
     stepSummary: { type: 'STRING' },
+    candidateIndex: {
+      type: 'NUMBER',
+      description: 'If the target matches a row in the numbered candidate list, set this index (0-based). Otherwise -1.',
+    },
   },
-  required: ['x', 'y', 'description', 'confidence', 'elementLabel', 'isMultiStep', 'overallPlan', 'stepSummary'],
+  required: [
+    'x',
+    'y',
+    'description',
+    'confidence',
+    'elementLabel',
+    'isMultiStep',
+    'overallPlan',
+    'stepSummary',
+    'candidateIndex',
+  ],
 };
 
 function stripJsonArtifacts(str) {
@@ -190,6 +205,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           description: message.description,
           elementLabel: message.elementLabel || '',
           intentText: message.intentText || '',
+          candidateIndex: message.candidateIndex,
         });
       }
     });
@@ -236,19 +252,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function analyzePage({ url, userMessage, firecrawlKey, geminiKey, clientScreenshot, pageText, pageTitle: clientTitle }) {
+async function analyzePage({
+  url,
+  userMessage,
+  firecrawlKey,
+  geminiKey,
+  clientScreenshot,
+  pageText,
+  pageTitle: clientTitle,
+  clickableCandidatesText,
+}) {
   let screenshot;
   let markdown;
   let pageTitle = clientTitle || '';
+  let firecrawlMs = 0;
+  const usedLiveViewport = Boolean(
+    clientScreenshot && typeof clientScreenshot === 'string' && clientScreenshot.startsWith('data:image')
+  );
 
-  if (clientScreenshot && typeof clientScreenshot === 'string' && clientScreenshot.startsWith('data:image')) {
+  if (usedLiveViewport) {
     screenshot = clientScreenshot;
     markdown = (pageText || '').slice(0, 8000);
   } else {
+    if (!firecrawlKey || !String(firecrawlKey).trim()) {
+      throw new Error(
+        'Could not capture this tab and no Firecrawl key is set. Open a normal https page, use the extension on the active tab, or add a Firecrawl API key in Settings.'
+      );
+    }
+    const tFc = Date.now();
     const scrapeRes = await fetch('https://api.firecrawl.dev/v1/scrape', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${firecrawlKey}`,
+        Authorization: `Bearer ${firecrawlKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -260,6 +295,7 @@ async function analyzePage({ url, userMessage, firecrawlKey, geminiKey, clientSc
     });
 
     const scrapeData = await scrapeRes.json();
+    firecrawlMs = Date.now() - tFc;
     if (!scrapeRes.ok) {
       throw new Error(scrapeData.error || `Firecrawl error [${scrapeRes.status}]`);
     }
@@ -273,19 +309,48 @@ async function analyzePage({ url, userMessage, firecrawlKey, geminiKey, clientSc
     }
   }
 
+  const tGem = Date.now();
   const geminiResult = await callGemini({
     geminiKey,
     screenshot,
     markdown,
     userMessage,
     pageTitle,
-    usedLiveViewport: Boolean(clientScreenshot),
+    usedLiveViewport,
+    clickableCandidatesText: usedLiveViewport ? clickableCandidatesText : '',
   });
+  const geminiMs = Date.now() - tGem;
 
-  return { success: true, ...geminiResult, pageTitle };
+  return {
+    success: true,
+    ...geminiResult,
+    pageTitle,
+    usedRemoteScrape: !usedLiveViewport,
+    timings: {
+      dataSource: usedLiveViewport ? 'live' : 'firecrawl',
+      firecrawlMs: usedLiveViewport ? 0 : firecrawlMs,
+      geminiMs,
+    },
+  };
 }
 
-async function callGemini({ geminiKey, screenshot, markdown, userMessage, pageTitle, usedLiveViewport }) {
+function inferImageMimeFromInput(screenshot) {
+  if (!screenshot || typeof screenshot !== 'string') return 'image/png';
+  if (screenshot.startsWith('data:image/jpeg')) return 'image/jpeg';
+  if (screenshot.startsWith('data:image/webp')) return 'image/webp';
+  if (screenshot.startsWith('data:image/gif')) return 'image/gif';
+  return 'image/png';
+}
+
+async function callGemini({
+  geminiKey,
+  screenshot,
+  markdown,
+  userMessage,
+  pageTitle,
+  usedLiveViewport,
+  clickableCandidatesText,
+}) {
   const coordHint = usedLiveViewport
     ? `CRITICAL: The image is a pixel-accurate capture of the user's current browser viewport (what they see right now). x and y MUST be the center of the target control as a percentage of THIS image: x = 100 * (centerX / imageWidth), y = 100 * (centerY / imageHeight). Do not guess adjacent nav items — if the user asked for "Explore", the point must be on Explore, not Home.`
     : `The image may be from a server-side render and can differ from the user's tab (login, scroll, window size). Prefer anchors from the page text below when they disambiguate. x/y are still viewport percentages of this image.`;
@@ -320,15 +385,24 @@ ${coordHint}
 - If the user asks for "integrations" / HRIS / apps: elementLabel must be the real nav text (e.g. "Integrations", "Connected apps") if it appears anywhere in the page text, even when that row is off-screen in a scrollable sidebar — the extension scrolls to it.
 - If the control is inside a collapsed sidebar group, dropdown, or <details>, set isMultiStep true: overallPlan should say to expand/open that section first; stepSummary for this step names that parent (e.g. "Open Playground section"); elementLabel should match the visible expander control.
 - On GitHub profile pages, "sponsors", "funding", or donations often map to **Sponsors** in the profile sidebar/tabs, **Edit profile**, or README — use text visible in the screenshot.
+- If a numbered **Viewport controls** list is provided, prefer setting **candidateIndex** to the row index (0-based) when it matches the next click; set **candidateIndex** to **-1** when using coordinates only. When the list matches, still fill elementLabel with that row’s visible label.
 - ALWAYS return valid JSON for every request — never an empty response.`;
+
+  const candidateBlock =
+    usedLiveViewport && clickableCandidatesText && String(clickableCandidatesText).trim()
+      ? `\n\nViewport controls (reading order, 0-based index = candidateIndex):\n${String(clickableCandidatesText).slice(0, 12000)}`
+      : '';
 
   // Build the request parts
   const parts = [
-    { text: `User intent: "${userMessage}"\n\nPage title: "${pageTitle}"\n\nPage content (markdown):\n${markdown.substring(0, 2800)}` },
+    {
+      text: `User intent: "${userMessage}"\n\nPage title: "${pageTitle}"\n\nPage content (markdown):\n${markdown.substring(0, 2800)}${candidateBlock}`,
+    },
   ];
 
   // Convert screenshot to base64 - handle URL, data URI, or raw base64
   let base64Data;
+  const imageMime = inferImageMimeFromInput(screenshot);
   if (screenshot.startsWith('http://') || screenshot.startsWith('https://')) {
     base64Data = await imageUrlToBase64(screenshot);
   } else if (screenshot.startsWith('data:')) {
@@ -345,7 +419,7 @@ ${coordHint}
         ...parts,
         {
           inlineData: {
-            mimeType: 'image/png',
+            mimeType: imageMime,
             data: base64Data,
           }
         }
@@ -427,53 +501,6 @@ ${coordHint}
   }
 
   if (!result || typeof result !== 'object') {
-    const geminiRes3 = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              {
-                text: `Your previous answer was not valid JSON. Reply with ONLY one JSON object (no markdown) with keys: x, y, description, confidence, elementLabel, isMultiStep, overallPlan, stepSummary. Pick the BEST next click for: "${userMessage}"\n\nPage title: ${pageTitle}\nText:\n${markdown.substring(0, 1800)}`,
-              },
-              {
-                inlineData: { mimeType: 'image/png', data: base64Data },
-              },
-            ],
-          },
-        ],
-        systemInstruction: {
-          parts: [
-            {
-              text: `${systemInstruction}\n\nCRITICAL: Single JSON object only. confidence 0.35–0.65 if uncertain.`,
-            },
-          ],
-        },
-        generationConfig: {
-          temperature: 0.12,
-          maxOutputTokens: 800,
-          responseMimeType: 'application/json',
-        },
-      }),
-    });
-    const geminiData3 = await geminiRes3.json();
-    if (geminiRes3.ok && geminiData3.candidates?.length) {
-      const rawText3 = getGeminiResponseText(geminiData3);
-      let jsonStr3 = rawText3.trim();
-      const fence3 = jsonStr3.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (fence3) jsonStr3 = fence3[1].trim();
-      result =
-        tryParseJsonWithRepair(jsonStr3) ||
-        extractBalancedJsonObject(jsonStr3) ||
-        extractAnyGuideJson(jsonStr3) ||
-        tryParseJsonWithRepair(rawText3) ||
-        extractBalancedJsonObject(rawText3) ||
-        extractAnyGuideJson(rawText3);
-    }
-  }
-
-  if (!result || typeof result !== 'object') {
     return buildFallbackGuideFromRawText(rawText);
   }
 
@@ -491,6 +518,10 @@ ${coordHint}
   let conf = Number(result.confidence);
   if (!Number.isFinite(conf)) conf = 0.5;
 
+  let candidateIndex = Number(result.candidateIndex);
+  if (!Number.isFinite(candidateIndex)) candidateIndex = -1;
+  candidateIndex = Math.max(-1, Math.round(candidateIndex));
+
   return {
     x: Math.max(0, Math.min(100, Number(result.x) || 50)),
     y: Math.max(0, Math.min(100, Number(result.y) || 50)),
@@ -500,6 +531,7 @@ ${coordHint}
     isMultiStep: Boolean(result.isMultiStep),
     overallPlan,
     stepSummary,
+    candidateIndex,
     usedFallback,
   };
 }
