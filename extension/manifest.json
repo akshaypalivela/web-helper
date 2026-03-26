@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Integration Guide",
+  "version": "3.0.0",
+  "description": "AI-powered integration guide using Gemini Vision + Firecrawl. 100% local-first.",
+  "permissions": ["sidePanel", "storage", "activeTab", "scripting", "tabs"],
+  "host_permissions": ["<all_urls>", "https://storage.googleapis.com/*"],
+  "action": {
+    "default_icon": "icon.png",
+    "default_title": "Open Integration Guide"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content-styles.css"]
+    }
+  ],
+  "icons": {
+    "48": "icon.png",
+    "128": "icon.png"
+  }
+}
