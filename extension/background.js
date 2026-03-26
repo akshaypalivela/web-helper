@@ -334,6 +334,9 @@ async function analyzePage({
   };
 }
 
+/** Stable model tuned for low-latency multimodal UI tasks (vs heavier preview models). */
+const GEMINI_MODEL = 'gemini-2.5-flash';
+
 function inferImageMimeFromInput(screenshot) {
   if (!screenshot || typeof screenshot !== 'string') return 'image/png';
   if (screenshot.startsWith('data:image/jpeg')) return 'image/jpeg';
@@ -385,7 +388,7 @@ ${coordHint}
 - If the user asks for "integrations" / HRIS / apps: elementLabel must be the real nav text (e.g. "Integrations", "Connected apps") if it appears anywhere in the page text, even when that row is off-screen in a scrollable sidebar — the extension scrolls to it.
 - If the control is inside a collapsed sidebar group, dropdown, or <details>, set isMultiStep true: overallPlan should say to expand/open that section first; stepSummary for this step names that parent (e.g. "Open Playground section"); elementLabel should match the visible expander control.
 - On GitHub profile pages, "sponsors", "funding", or donations often map to **Sponsors** in the profile sidebar/tabs, **Edit profile**, or README — use text visible in the screenshot.
-- If a numbered **Viewport controls** list is provided, prefer setting **candidateIndex** to the row index (0-based) when it matches the next click; set **candidateIndex** to **-1** when using coordinates only. When the list matches, still fill elementLabel with that row’s visible label.
+- If a numbered **Viewport controls** list is provided and one row clearly matches the next action, set **candidateIndex** to that index and copy **elementLabel** exactly from that row — prefer this over guessing x/y alone for accuracy. Use **candidateIndex** **-1** only when the correct control is not in the list or you must rely on the screenshot coordinates.
 - ALWAYS return valid JSON for every request — never an empty response.`;
 
   const candidateBlock =
@@ -396,7 +399,7 @@ ${coordHint}
   // Build the request parts
   const parts = [
     {
-      text: `User intent: "${userMessage}"\n\nPage title: "${pageTitle}"\n\nPage content (markdown):\n${markdown.substring(0, 2800)}${candidateBlock}`,
+      text: `User intent: "${userMessage}"\n\nPage title: "${pageTitle}"\n\nPage content (markdown):\n${markdown.substring(0, 4500)}${candidateBlock}`,
     },
   ];
 
@@ -411,7 +414,7 @@ ${coordHint}
     base64Data = screenshot;
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${geminiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${geminiKey}`;
 
   const makeBody = (useSchema) => ({
     contents: [{
@@ -427,8 +430,8 @@ ${coordHint}
     }],
     systemInstruction: { parts: [{ text: systemInstruction }] },
     generationConfig: {
-      temperature: 0.2,
-      maxOutputTokens: 900,
+      temperature: 0.15,
+      maxOutputTokens: 1024,
       responseMimeType: 'application/json',
       ...(useSchema ? { responseSchema: GUIDE_RESPONSE_SCHEMA } : {}),
     },

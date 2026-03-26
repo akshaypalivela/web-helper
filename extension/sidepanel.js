@@ -52,8 +52,8 @@ function igLog(label, data) {
   console.info('[IntegrationGuide]', label, data);
 }
 
-/** Smaller JPEG for Gemini multimodal (faster upload). */
-function downscaleDataUrlForGemini(dataUrl, maxWidth = 1280, quality = 0.82) {
+/** Resize wide viewports only; higher quality preserves small text for vision accuracy. */
+function downscaleDataUrlForGemini(dataUrl, maxWidth = 1536, quality = 0.88) {
   if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image')) {
     return Promise.resolve(dataUrl);
   }
