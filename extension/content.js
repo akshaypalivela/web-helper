@@ -77,7 +77,7 @@ if (window === window.top && !window.__igDomObserver) {
       try {
         chrome.runtime.sendMessage({ type: 'GUIDANCE_DOM_CHANGED', url: window.location.href });
       } catch (_) {}
-    }, 2200);
+    }, 1400);
   });
   const startDomObs = () => {
     if (document.body) {
@@ -299,21 +299,61 @@ function isInLikelyNav(el) {
   );
 }
 
+/** When the user asks in one language but the UI is localized, add nav keywords to match visible text. */
+const INTENT_SEMANTIC_KEYS = [
+  {
+    test: /\b(careers?|jobs?|hiring|recruit|join\s+us|work\s+with|employment)\b/i,
+    keys: [
+      'karriere',
+      'karrieren',
+      'stellen',
+      'stellenangebote',
+      'offene',
+      'bewerbung',
+      'jobs',
+      'empleo',
+      'carrera',
+      'carreiras',
+      'carrière',
+      'carrières',
+      'recrutement',
+      'lavoro',
+      'werken',
+      'vacancies',
+      'vacature',
+    ],
+  },
+  {
+    test: /\b(contact|support|help)\b/i,
+    keys: ['kontakt', 'hilfe', 'support', 'ayuda', 'contacto', 'aide'],
+  },
+  {
+    test: /\b(settings?|preferences?|account)\b/i,
+    keys: ['einstellungen', 'konto', 'paramètres', 'configuración', 'preferencias'],
+  },
+];
+
 function intentKeywordSet(intentText) {
   const keys = new Set();
-  const n = normalizeLabel(intentText || '');
+  const raw = intentText || '';
+  const n = normalizeLabel(raw);
   if (!n) return keys;
   n.split(/\s+/).forEach((w) => {
     if (w.length >= 4) keys.add(w);
   });
-  if (/\bintegrat/i.test(intentText || '')) keys.add('integrat');
-  if (/\bhris\b/i.test(intentText || '')) keys.add('hris');
-  if (/\bapi\b/i.test(intentText || '')) keys.add('api');
-  if (/\bapp\b/i.test(intentText || '')) keys.add('app');
-  if (/\bsearch\b/i.test(intentText || '')) keys.add('search');
-  if (/\bhome\b/i.test(intentText || '')) keys.add('home');
-  if (/\busage\b/i.test(intentText || '')) keys.add('usage');
-  if (/\banalytics\b/i.test(intentText || '')) keys.add('analytics');
+  for (const { test, keys: extra } of INTENT_SEMANTIC_KEYS) {
+    if (test.test(raw)) {
+      extra.forEach((k) => keys.add(k));
+    }
+  }
+  if (/\bintegrat/i.test(raw)) keys.add('integrat');
+  if (/\bhris\b/i.test(raw)) keys.add('hris');
+  if (/\bapi\b/i.test(raw)) keys.add('api');
+  if (/\bapp\b/i.test(raw)) keys.add('app');
+  if (/\bsearch\b/i.test(raw)) keys.add('search');
+  if (/\bhome\b/i.test(raw)) keys.add('home');
+  if (/\busage\b/i.test(raw)) keys.add('usage');
+  if (/\banalytics\b/i.test(raw)) keys.add('analytics');
   return keys;
 }
 

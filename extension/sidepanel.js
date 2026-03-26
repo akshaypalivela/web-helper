@@ -14,15 +14,39 @@ const state = {
   awaitingContextChoice: false,
   stickyManualPause: false,
   lastGuidanceAnalyzeAt: 0,
-  analyzeInProgress: false,
+  /** Number of in-flight analyze runs (new goals can start while an older epoch finishes). */
+  analyzeInFlight: 0,
   deepGuidanceOptIn: false,
   completionPromptShown: false,
   taskCompletionPaused: false,
+  /** Bumped on each new chat goal — stale analyses and timers ignore old epochs. */
+  guidanceEpoch: 0,
+  /** Last analyze run tied to guidanceEpoch — blocks duplicate same-epoch calls while allowing a new goal to supersede. */
+  activeAnalyzeEpoch: 0,
   firecrawlKey: '',
   geminiKey: ''
 };
 
 let navigateDebounce = null;
+/** Tab IDs where we already injected highlight CSS (avoid repeat insertCSS). */
+const tabCssInjected = new Set();
+
+function cancelPendingNavigation() {
+  if (navigateDebounce) {
+    clearTimeout(navigateDebounce);
+    navigateDebounce = null;
+  }
+}
+
+function syncGuidanceEpochToStorage() {
+  try {
+    const v = { ig_guidance_epoch: state.guidanceEpoch };
+    if (chrome.storage.session) {
+      chrome.storage.session.set(v);
+    }
+    chrome.storage.local.set(v);
+  } catch (_) {}
+}
 
 // DOM
 const chatMessages = document.getElementById('chat-messages');
@@ -69,13 +93,17 @@ document.getElementById('clear-btn').addEventListener('click', () => {
     state.guidanceTabId = null;
     state.guidanceDomain = '';
     state.lastGuidanceAnalyzeAt = 0;
-    state.analyzeInProgress = false;
+    state.analyzeInFlight = 0;
+    state.activeAnalyzeEpoch = 0;
+    state.guidanceEpoch = 0;
     state.deepGuidanceOptIn = false;
     state.completionPromptShown = false;
     state.taskCompletionPaused = false;
     state.pauseAutoAnalysis = false;
     state.awaitingContextChoice = false;
     state.stickyManualPause = false;
+    cancelPendingNavigation();
+    syncGuidanceEpochToStorage();
     hideContextStrip();
     chrome.storage.local.remove('guide_session_end_v1');
     document.getElementById('firecrawl-key-input').value = '';
@@ -114,6 +142,9 @@ document.getElementById('reset-guidance-btn').addEventListener('click', () => {
   state.lastGuidanceUrl = '';
   state.guidanceTabId = null;
   state.guidanceDomain = '';
+  state.guidanceEpoch += 1;
+  cancelPendingNavigation();
+  syncGuidanceEpochToStorage();
   state.deepGuidanceOptIn = false;
   state.completionPromptShown = false;
   state.taskCompletionPaused = false;
@@ -222,12 +253,25 @@ async function deliverHighlight(tabId, response) {
   await new Promise((resolve) => {
     chrome.tabs.sendMessage(tabId, { type: 'CLEAR_HIGHLIGHTS' }, () => resolve());
   });
+
+  const drawViaMessage = () =>
+    new Promise((resolve) => {
+      chrome.tabs.sendMessage(tabId, { type: 'HIGHLIGHT_AT', ...payload }, (r) => {
+        if (chrome.runtime.lastError) resolve(false);
+        else resolve(r?.success !== false);
+      });
+    });
+
+  if (await drawViaMessage()) return { ok: true };
+
+  if (!tabCssInjected.has(tabId)) {
+    try {
+      await chrome.scripting.insertCSS({ target: { tabId }, files: ['content-styles.css'] });
+      tabCssInjected.add(tabId);
+    } catch (_) {}
+  }
+
   try {
-    await chrome.scripting.insertCSS({ target: { tabId }, files: ['content-styles.css'] });
-  } catch (_) {}
-  try {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
-    await new Promise((r) => setTimeout(r, 80));
     await chrome.scripting.executeScript({
       target: { tabId },
       func: (p) => {
@@ -236,16 +280,29 @@ async function deliverHighlight(tabId, response) {
       args: [payload],
     });
     return { ok: true };
-  } catch (e) {
-    return new Promise((resolve) => {
-      chrome.tabs.sendMessage(tabId, { type: 'HIGHLIGHT_AT', ...payload }, (r) => {
-        if (chrome.runtime.lastError) {
-          resolve({ ok: false, error: chrome.runtime.lastError.message });
-        } else if (r && r.success === false) {
-          resolve({ ok: false, error: r.error || 'Highlight failed' });
-        } else resolve({ ok: true, ...r });
+  } catch (_) {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+      await new Promise((r) => setTimeout(r, 50));
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (p) => {
+          if (typeof window.__integrationGuideDraw === 'function') window.__integrationGuideDraw(p);
+        },
+        args: [payload],
       });
-    });
+      return { ok: true };
+    } catch (e2) {
+      return new Promise((resolve) => {
+        chrome.tabs.sendMessage(tabId, { type: 'HIGHLIGHT_AT', ...payload }, (r) => {
+          if (chrome.runtime.lastError) {
+            resolve({ ok: false, error: chrome.runtime.lastError.message });
+          } else if (r && r.success === false) {
+            resolve({ ok: false, error: r.error || 'Highlight failed' });
+          } else resolve({ ok: true, ...r });
+        });
+      });
+    }
   }
 }
 
@@ -260,7 +317,11 @@ function applyPanelCloseSessionEnd() {
   state.stickyManualPause = true;
   state.awaitingContextChoice = false;
   state.lastGuidanceAnalyzeAt = 0;
-  state.analyzeInProgress = false;
+  state.analyzeInFlight = 0;
+  state.activeAnalyzeEpoch = 0;
+  state.guidanceEpoch += 1;
+  cancelPendingNavigation();
+  syncGuidanceEpochToStorage();
   state.deepGuidanceOptIn = false;
   state.completionPromptShown = false;
   state.taskCompletionPaused = false;
@@ -304,6 +365,7 @@ async function init() {
   updatePageContext();
   updateGuidanceBar();
   hideContextStrip();
+  syncGuidanceEpochToStorage();
 
   chrome.tabs.onActivated?.addListener((activeInfo) => {
     chrome.tabs.get(activeInfo.tabId, (tab) => {
@@ -327,6 +389,7 @@ async function init() {
     if ((area !== 'session' && area !== 'local') || !changes.ig_dom_signal?.newValue) return;
     const sig = changes.ig_dom_signal.newValue;
     if (!sig || sig.tabId !== state.guidanceTabId) return;
+    if (sig.epoch != null && sig.epoch !== state.guidanceEpoch) return;
     if (!state.guidanceGoal || state.pauseAutoAnalysis || state.awaitingContextChoice || state.stickyManualPause) return;
     if (state.guidanceStepsDone.length === 0) return;
     if (sig.url !== state.lastGuidanceUrl) return;
@@ -410,16 +473,19 @@ function handleSidePanelTabActivated(tab) {
 }
 
 function scheduleGuidanceFollowUp() {
+  const epoch = state.guidanceEpoch;
   const prevDomain = state.currentDomain;
   updatePageContext();
   if (navigateDebounce) clearTimeout(navigateDebounce);
   navigateDebounce = setTimeout(() => {
     navigateDebounce = null;
+    if (epoch !== state.guidanceEpoch) return;
     if (!state.lastGoal || !state.firecrawlKey || !state.geminiKey) return;
     if (state.pauseAutoAnalysis || state.awaitingContextChoice || state.stickyManualPause) return;
     if (state.taskCompletionPaused) return;
-    if (state.analyzeInProgress) return;
+    if (state.analyzeInFlight > 0) return;
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (epoch !== state.guidanceEpoch) return;
       const t = tabs[0];
       if (!t?.id || !t.url || t.url.startsWith('chrome://')) return;
       if (state.guidanceTabId != null && t.id !== state.guidanceTabId) return;
@@ -436,15 +502,18 @@ function scheduleGuidanceFollowUp() {
 
 /** Same URL but DOM changed (e.g. menu opened) — continue multi-step guidance. */
 function scheduleDomGuidanceFollowUp(fromInteraction) {
+  const epoch = state.guidanceEpoch;
   if (navigateDebounce) clearTimeout(navigateDebounce);
   navigateDebounce = setTimeout(() => {
     navigateDebounce = null;
+    if (epoch !== state.guidanceEpoch) return;
     if (!state.lastGoal || !state.firecrawlKey || !state.geminiKey) return;
     if (state.pauseAutoAnalysis || state.awaitingContextChoice || state.stickyManualPause) return;
     if (state.taskCompletionPaused) return;
-    if (state.analyzeInProgress) return;
+    if (state.analyzeInFlight > 0) return;
     if (state.guidanceStepsDone.length === 0) return;
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (epoch !== state.guidanceEpoch) return;
       const t = tabs[0];
       if (!t?.id || t.id !== state.guidanceTabId) return;
       if (t.url !== state.lastGuidanceUrl) return;
@@ -564,6 +633,9 @@ chatForm.addEventListener('submit', async (e) => {
   state.deepGuidanceOptIn = false;
   state.completionPromptShown = false;
   state.taskCompletionPaused = false;
+  state.guidanceEpoch += 1;
+  cancelPendingNavigation();
+  syncGuidanceEpochToStorage();
   hideContextStrip();
   updateGuidanceBar();
   addMessage('assistant', `🔍 Searching for **"${text}"** on this page...`);
@@ -571,8 +643,12 @@ chatForm.addEventListener('submit', async (e) => {
 });
 
 async function analyzeCurrentPage(userMessage) {
-  if (state.analyzeInProgress) return;
-  state.analyzeInProgress = true;
+  const runEpoch = state.guidanceEpoch;
+  if (state.analyzeInFlight > 0 && state.activeAnalyzeEpoch === runEpoch) {
+    return;
+  }
+  state.activeAnalyzeEpoch = runEpoch;
+  state.analyzeInFlight += 1;
   const typingEl = showTyping();
   chrome.runtime.sendMessage({ type: 'CLEAR_HIGHLIGHTS' });
 
@@ -580,6 +656,10 @@ async function analyzeCurrentPage(userMessage) {
     const pageInfo = await new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'GET_PAGE_INFO' }, resolve);
     });
+    if (runEpoch !== state.guidanceEpoch) {
+      removeEl(typingEl);
+      return;
+    }
 
     const url = pageInfo?.url || state.currentUrl;
     if (!url || url.startsWith('chrome://')) {
@@ -632,6 +712,11 @@ async function analyzeCurrentPage(userMessage) {
       }
     }
 
+    if (runEpoch !== state.guidanceEpoch) {
+      removeEl(typingEl);
+      return;
+    }
+
     const response = await new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({
         type: 'ANALYZE_PAGE',
@@ -653,6 +738,7 @@ async function analyzeCurrentPage(userMessage) {
     removeEl(typingEl);
 
     if (!response) return;
+    if (runEpoch !== state.guidanceEpoch) return;
 
     state.lastGuidanceUrl = url;
 
@@ -718,8 +804,9 @@ async function analyzeCurrentPage(userMessage) {
         Number.isFinite(Number(response.x)) ||
         Number.isFinite(Number(response.y)));
 
-    if (shouldTryHighlight && activeTab?.id) {
+    if (shouldTryHighlight && activeTab?.id && runEpoch === state.guidanceEpoch) {
       const hl = await deliverHighlight(activeTab.id, response);
+      if (runEpoch !== state.guidanceEpoch) return;
       if (hl.ok) {
         addMessage('assistant', '🟠 I\'ve placed a **ghost marker** on the page where you should click.');
       } else {
@@ -733,9 +820,12 @@ async function analyzeCurrentPage(userMessage) {
     state.lastGuidanceAnalyzeAt = Date.now();
   } catch (err) {
     removeEl(typingEl);
-    addMessage('assistant', `❌ ${err.message}`);
+    if (runEpoch === state.guidanceEpoch) {
+      addMessage('assistant', `❌ ${err.message}`);
+    }
   } finally {
-    state.analyzeInProgress = false;
+    state.analyzeInFlight -= 1;
+    if (state.analyzeInFlight < 0) state.analyzeInFlight = 0;
   }
 }
 

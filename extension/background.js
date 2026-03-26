@@ -144,21 +144,38 @@ function stripJsonArtifacts(str) {
 // Open side panel when extension icon is clicked
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
+function emitDomSignal(payload) {
+  if (chrome.storage.session) {
+    chrome.storage.session.set({ ig_dom_signal: payload });
+  } else {
+    chrome.storage.local.set({ ig_dom_signal: payload });
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'GUIDANCE_DOM_CHANGED' || message.type === 'GUIDANCE_USER_INTERACTION') {
     const tabId = sender.tab?.id;
-    if (tabId) {
-      const payload = {
-        tabId,
-        url: message.url || '',
-        t: Date.now(),
-        source: message.type === 'GUIDANCE_USER_INTERACTION' ? 'interaction' : 'dom',
-      };
-      if (chrome.storage.session) {
-        chrome.storage.session.set({ ig_dom_signal: payload });
-      } else {
-        chrome.storage.local.set({ ig_dom_signal: payload });
-      }
+    if (!tabId) return;
+
+    const base = {
+      tabId,
+      url: message.url || '',
+      t: Date.now(),
+      source: message.type === 'GUIDANCE_USER_INTERACTION' ? 'interaction' : 'dom',
+    };
+
+    const finish = (epoch) => {
+      emitDomSignal({ ...base, epoch: typeof epoch === 'number' ? epoch : 0 });
+    };
+
+    if (chrome.storage.session) {
+      chrome.storage.session.get('ig_guidance_epoch', (r) => {
+        finish(r?.ig_guidance_epoch ?? 0);
+      });
+    } else {
+      chrome.storage.local.get('ig_guidance_epoch', (r) => {
+        finish(r?.ig_guidance_epoch ?? 0);
+      });
     }
     return;
   }
@@ -238,7 +255,7 @@ async function analyzePage({ url, userMessage, firecrawlKey, geminiKey, clientSc
         url,
         formats: ['screenshot', 'markdown'],
         onlyMainContent: false,
-        waitFor: 2000,
+        waitFor: 1200,
       }),
     });
 
@@ -292,6 +309,7 @@ ${coordHint}
     "overallPlan": "<brief multi-step overview, or empty string if isMultiStep is false>",
     "stepSummary": "<one line: what this click accomplishes; used for step history>"
   }
+- **Language / locale:** The UI may be in any language. The user might ask in English (e.g. "careers page") while the visible nav says **Karriere**, **Empleo**, **Carrières**, etc. Map intent semantically: Careers/Jobs/Hiring ↔ Karriere/Stellen/Jobs/Recrutement/Offene Stellen/Trabaja con nosotros. **elementLabel MUST use the exact text as it appears on screen** (including accents), not a translation the user said — so the extension can match the real link.
 - Be smart about synonyms: "Settings" = gear icon, preferences, account, config.
 - If the user says "Profile", also look for avatar, account, user icon.
 - If you cannot find a control that matches the user's intent, set confidence to 0, still pick best-effort x/y for a related area, and explain in description (without embedding JSON).
@@ -306,7 +324,7 @@ ${coordHint}
 
   // Build the request parts
   const parts = [
-    { text: `User intent: "${userMessage}"\n\nPage title: "${pageTitle}"\n\nPage content (markdown):\n${markdown.substring(0, 3000)}` },
+    { text: `User intent: "${userMessage}"\n\nPage title: "${pageTitle}"\n\nPage content (markdown):\n${markdown.substring(0, 2800)}` },
   ];
 
   // Convert screenshot to base64 - handle URL, data URI, or raw base64
@@ -336,7 +354,7 @@ ${coordHint}
     systemInstruction: { parts: [{ text: systemInstruction }] },
     generationConfig: {
       temperature: 0.2,
-      maxOutputTokens: 1200,
+      maxOutputTokens: 900,
       responseMimeType: 'application/json',
       ...(useSchema ? { responseSchema: GUIDE_RESPONSE_SCHEMA } : {}),
     },
@@ -417,7 +435,7 @@ ${coordHint}
           {
             parts: [
               {
-                text: `Your previous answer was not valid JSON. Reply with ONLY one JSON object (no markdown) with keys: x, y, description, confidence, elementLabel, isMultiStep, overallPlan, stepSummary. Pick the BEST next click for: "${userMessage}"\n\nPage title: ${pageTitle}\nText:\n${markdown.substring(0, 2000)}`,
+                text: `Your previous answer was not valid JSON. Reply with ONLY one JSON object (no markdown) with keys: x, y, description, confidence, elementLabel, isMultiStep, overallPlan, stepSummary. Pick the BEST next click for: "${userMessage}"\n\nPage title: ${pageTitle}\nText:\n${markdown.substring(0, 1800)}`,
               },
               {
                 inlineData: { mimeType: 'image/png', data: base64Data },
@@ -434,7 +452,7 @@ ${coordHint}
         },
         generationConfig: {
           temperature: 0.12,
-          maxOutputTokens: 1200,
+          maxOutputTokens: 800,
           responseMimeType: 'application/json',
         },
       }),
