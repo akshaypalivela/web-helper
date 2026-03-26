@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Integration Guide</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    :root {
+      --bg: #0c0c14;
+      --surface: #14141f;
+      --surface-2: #1c1c2e;
+      --border: rgba(255,255,255,0.06);
+      --text: #e8e8ed;
+      --text-muted: rgba(255,255,255,0.45);
+      --text-dim: rgba(255,255,255,0.25);
+      --accent: #f97316;
+      --accent-dim: rgba(249,115,22,0.15);
+      --accent-glow: rgba(249,115,22,0.3);
+      --green: #34d399;
+      --red: #f87171;
+    }
+    
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      font-size: 13px;
+    }
+
+    .tab-bar {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      flex-shrink: 0;
+    }
+    .tab {
+      flex: 1; padding: 12px 0; text-align: center;
+      font-size: 12px; font-weight: 500; color: var(--text-muted);
+      cursor: pointer; border-bottom: 2px solid transparent;
+      transition: all 0.2s; letter-spacing: 0.02em;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    .panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+    .panel.active { display: flex; }
+
+    .chat-messages {
+      flex: 1; overflow-y: auto; padding: 16px;
+      display: flex; flex-direction: column; gap: 12px;
+    }
+    .chat-messages::-webkit-scrollbar { width: 3px; }
+    .chat-messages::-webkit-scrollbar-track { background: transparent; }
+    .chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .msg { display: flex; gap: 10px; animation: fadeUp 0.25s ease-out; }
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } }
+    
+    .msg-avatar {
+      width: 28px; height: 28px; border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), #ea580c);
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; margin-top: 2px;
+    }
+    .msg-avatar svg { width: 14px; height: 14px; color: white; }
+    
+    .msg-bubble {
+      max-width: 85%; padding: 10px 14px; border-radius: 14px;
+      line-height: 1.55; font-size: 13px;
+    }
+    .msg-bubble strong { font-weight: 600; }
+    .msg-bubble em { font-style: italic; opacity: 0.8; }
+    .msg-bubble code { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+    
+    .msg.assistant .msg-bubble {
+      background: var(--surface); border: 1px solid var(--border);
+      border-top-left-radius: 4px; color: var(--text);
+    }
+    .msg.user { justify-content: flex-end; }
+    .msg.user .msg-bubble {
+      background: var(--accent-dim); border: 1px solid rgba(249,115,22,0.2);
+      border-top-right-radius: 4px; color: var(--text);
+    }
+
+    .typing-dots { display: flex; gap: 4px; padding: 14px; }
+    .typing-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--text-muted);
+      animation: pulse 1.4s infinite both;
+    }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes pulse { 0%,80%,100% { opacity: 0.25; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1); } }
+
+    .journey-bar {
+      padding: 8px 16px; border-bottom: 1px solid var(--border);
+      display: none; gap: 6px; align-items: center;
+      font-size: 10px; color: var(--text-dim);
+      overflow-x: auto; flex-shrink: 0;
+    }
+    .journey-bar.visible { display: flex; }
+    .journey-bar .step-active { color: var(--accent); font-weight: 500; }
+    .journey-bar .arrow { opacity: 0.3; }
+
+    .chat-input-area { padding: 12px 16px; border-top: 1px solid var(--border); flex-shrink: 0; }
+    .input-row { display: flex; gap: 8px; }
+    .chat-input {
+      flex: 1; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 10px 14px; color: var(--text);
+      font-size: 13px; font-family: inherit; outline: none; transition: border-color 0.2s;
+    }
+    .chat-input::placeholder { color: var(--text-dim); }
+    .chat-input:focus { border-color: var(--accent); }
+    .send-btn {
+      width: 40px; height: 40px; background: var(--accent);
+      border: none; border-radius: 12px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: all 0.15s; flex-shrink: 0;
+    }
+    .send-btn:hover { background: #ea580c; transform: scale(1.04); }
+    .send-btn svg { width: 16px; height: 16px; color: white; }
+
+    .settings-content {
+      flex: 1; overflow-y: auto; padding: 20px 16px;
+      display: flex; flex-direction: column; gap: 20px;
+    }
+    .setting-group { display: flex; flex-direction: column; gap: 8px; }
+    .setting-label { font-size: 11px; color: var(--text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; }
+    .setting-input {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 10px 12px; color: var(--text);
+      font-size: 13px; font-family: inherit; outline: none; width: 100%;
+      transition: border-color 0.2s;
+    }
+    .setting-input::placeholder { color: var(--text-dim); }
+    .setting-input:focus { border-color: var(--accent); }
+    .save-btn {
+      background: var(--accent); color: white; border: none; border-radius: 10px;
+      padding: 10px 0; font-size: 13px; font-weight: 600;
+      font-family: inherit; cursor: pointer; transition: background 0.15s;
+    }
+    .save-btn:hover { background: #ea580c; }
+    .status-text { font-size: 11px; text-align: center; }
+    .status-text.success { color: var(--green); }
+    .status-text.error { color: var(--red); }
+
+    .privacy-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 14px; display: flex; gap: 10px; align-items: flex-start;
+    }
+    .privacy-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: rgba(52,211,153,0.1);
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .privacy-icon svg { width: 16px; height: 16px; color: var(--green); }
+    .privacy-text { font-size: 11px; color: var(--text-muted); line-height: 1.5; }
+    .privacy-text strong { color: var(--green); font-weight: 600; }
+
+    .welcome {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; text-align: center; padding: 40px 24px;
+      flex: 1; gap: 16px;
+    }
+    .welcome-icon {
+      width: 48px; height: 48px; border-radius: 16px;
+      background: linear-gradient(135deg, var(--accent), #ea580c);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .welcome-icon svg { width: 24px; height: 24px; color: white; }
+    .welcome h2 { font-size: 18px; font-weight: 700; }
+    .welcome p { font-size: 12px; color: var(--text-muted); line-height: 1.6; max-width: 260px; }
+
+    .confidence-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 6px;
+      font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+    }
+    .confidence-high { background: rgba(52,211,153,0.15); color: #34d399; }
+    .confidence-med { background: rgba(251,191,36,0.15); color: #fbbf24; }
+    .confidence-low { background: rgba(248,113,113,0.15); color: #f87171; }
+
+    .guidance-bar {
+      display: none;
+      flex-shrink: 0;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface-2);
+    }
+    .guidance-bar.visible { display: flex; }
+    .guidance-status {
+      font-size: 11px;
+      color: var(--text-muted);
+      line-height: 1.4;
+      flex: 1;
+      min-width: 0;
+    }
+    .guidance-btns { display: flex; gap: 6px; flex-shrink: 0; }
+    .guidance-btn {
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .guidance-btn:hover { border-color: rgba(249,115,22,0.4); color: var(--text); }
+    .guidance-btn.primary {
+      background: var(--accent-dim);
+      border-color: rgba(249,115,22,0.35);
+      color: var(--accent);
+    }
+    .guidance-btn.primary:hover { background: rgba(249,115,22,0.22); }
+
+    .context-strip {
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 16px;
+      border-bottom: 1px solid rgba(249,115,22,0.35);
+      background: rgba(249,115,22,0.08);
+      flex-shrink: 0;
+    }
+    .context-strip.visible { display: flex; }
+    .context-strip-msg {
+      font-size: 11px;
+      color: var(--text-muted);
+      line-height: 1.45;
+    }
+    .context-strip-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+
+  <div class="tab-bar">
+    <div class="tab active" data-tab="chat">Chat</div>
+    <div class="tab" data-tab="settings">Settings</div>
+  </div>
+
+  <div class="journey-bar" id="journey-bar"></div>
+
+  <div class="context-strip" id="context-strip">
+    <span class="context-strip-msg" id="context-strip-msg"></span>
+    <div class="context-strip-btns">
+      <button type="button" class="guidance-btn primary" id="continue-here-btn">Continue goal here</button>
+      <button type="button" class="guidance-btn" id="stay-manual-btn">Next step only</button>
+    </div>
+  </div>
+
+  <div class="guidance-bar" id="guidance-bar">
+    <span class="guidance-status" id="guidance-status"></span>
+    <div class="guidance-btns">
+      <button type="button" class="guidance-btn primary" id="next-step-btn">Next step</button>
+      <button type="button" class="guidance-btn" id="reset-guidance-btn">New goal</button>
+    </div>
+  </div>
+
+  <div class="panel active" id="panel-chat">
+    <div class="chat-messages" id="chat-messages">
+      <div class="welcome" id="welcome-screen">
+        <div class="welcome-icon">
+          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 12h3v8h6v-6h2v6h6v-8h3L12 2z"/></svg>
+        </div>
+        <h2>Integration Guide</h2>
+        <p>Describe a multi-step goal (e.g. make a repo private) — I’ll show one click at a time. Use <strong>Next step</strong> after each action.</p>
+        <p style="font-size:11px;color:var(--text-dim)">Add your <strong>Firecrawl</strong> and <strong>Gemini</strong> API keys in Settings to begin.</p>
+      </div>
+    </div>
+    <div class="chat-input-area">
+      <form class="input-row" id="chat-form">
+        <input type="text" class="chat-input" id="chat-input" placeholder="e.g. Help me find Settings..." autocomplete="off" />
+        <button type="submit" class="send-btn">
+          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <div class="panel" id="panel-settings">
+    <div class="settings-content">
+      <div class="setting-group">
+        <label class="setting-label">Firecrawl API Key</label>
+        <input type="password" class="setting-input" id="firecrawl-key-input" placeholder="fc-..." />
+        <p style="font-size:10px;color:var(--text-dim)">Get your key at <a href="https://firecrawl.dev" target="_blank" style="color:var(--accent);text-decoration:none">firecrawl.dev</a></p>
+      </div>
+      <div class="setting-group">
+        <label class="setting-label">Google Gemini API Key</label>
+        <input type="password" class="setting-input" id="gemini-key-input" placeholder="AIza..." />
+        <p style="font-size:10px;color:var(--text-dim)">Get your key at <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--accent);text-decoration:none">aistudio.google.com</a></p>
+      </div>
+      <button class="save-btn" id="save-btn">Save Settings</button>
+      <p class="status-text" id="status-text"></p>
+
+      <div class="privacy-card">
+        <div class="privacy-icon">
+          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        </div>
+        <div class="privacy-text">
+          <strong>100% Local-First</strong><br/>
+          Your data and API keys never leave your browser. Everything is stored in local extension storage. No external servers.
+        </div>
+      </div>
+
+      <div class="setting-group" style="margin-top:8px">
+        <label class="setting-label">Danger Zone</label>
+        <button class="save-btn" id="clear-btn" style="background:rgba(248,113,113,0.15);color:var(--red);">Clear All Data</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
