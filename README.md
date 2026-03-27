@@ -4,6 +4,8 @@
 
 > **Work in progress.** Behavior, accuracy, and latency will change. This is experimental—not a substitute for reading terms, permissions, or security prompts on the sites you use.
 
+**Live site:** [https://www.across.help/](https://www.across.help/)
+
 ## Why
 
 Most people don’t want to memorize every admin console, government portal, or developer surface they touch once a month. At the same time, **outsourcing entire flows** to an opaque agent doesn’t match everyone’s comfort level for accounts, money, or compliance. I believe there is room for a third path: **help that keeps you in control**, shows you **where** to act on the **real UI**, and lets you **build muscle memory** over time.
