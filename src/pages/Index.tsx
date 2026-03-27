@@ -78,14 +78,14 @@ const Index = () => {
       <section className="relative overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-b from-primary/10 via-transparent to-transparent" />
         <div className="relative max-w-4xl mx-auto px-6 pt-24 pb-16 text-center">
-          <div className="inline-flex flex-wrap items-center justify-center gap-2 mb-6">
-            <span className="inline-flex items-center gap-2 bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-500/30 px-4 py-1.5 rounded-full text-xs font-medium">
+          <div className="flex flex-col items-center gap-3 mb-8">
+            <span className="inline-flex items-center justify-center gap-2 bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-500/30 px-4 py-1.5 rounded-full text-xs font-medium text-center max-w-[min(100%,28rem)]">
               Work in progress — accuracy and behavior will change
             </span>
-          </div>
-          <div className="inline-flex items-center gap-2 bg-secondary px-4 py-1.5 rounded-full text-xs text-muted-foreground mb-6">
-            <Shield className="w-3.5 h-3.5 text-primary" />
-            Teacher, not autopilot — you stay in control
+            <span className="inline-flex items-center justify-center gap-2 bg-secondary px-4 py-1.5 rounded-full text-xs text-muted-foreground text-center max-w-[min(100%,28rem)]">
+              <Shield className="w-3.5 h-3.5 shrink-0 text-primary" />
+              Teacher, not autopilot — you stay in control
+            </span>
           </div>
           <h1 className="text-5xl sm:text-6xl font-bold tracking-tight leading-[1.1] mb-6">
             Integration<span className="block text-primary">Guide</span>
@@ -96,24 +96,24 @@ const Index = () => {
           <p className="text-sm text-muted-foreground max-w-2xl mx-auto mb-10 leading-relaxed">
             Between “do everything for me” and a single product’s help bot: <strong className="text-foreground">one step at a time</strong>, on the <strong className="text-foreground">live</strong> screen.
           </p>
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3 w-full max-w-md sm:max-w-none mx-auto">
             <button
               type="button"
               onClick={downloadExtension}
-              className="inline-flex items-center gap-2.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold px-8 py-4 rounded-2xl text-base transition-all hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-primary/25"
+              className="inline-flex items-center justify-center gap-2.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold px-8 py-4 rounded-2xl text-base transition-all hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-primary/25 min-h-[3.5rem] w-full sm:w-auto"
             >
-              <Download className="w-5 h-5" />
+              <Download className="w-5 h-5 shrink-0" />
               Download extension (zip)
             </button>
             <a
               href={GITHUB_REPO}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground border border-border rounded-2xl px-6 py-3.5 transition-colors hover:bg-secondary/80"
+              className="inline-flex items-center justify-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground border border-border rounded-2xl px-6 py-4 transition-colors hover:bg-secondary/80 min-h-[3.5rem] w-full sm:w-auto"
             >
-              <Github className="w-5 h-5" />
+              <Github className="w-5 h-5 shrink-0" />
               Source on GitHub
-              <ExternalLink className="w-3.5 h-3.5 opacity-70" />
+              <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-70" />
             </a>
           </div>
         </div>
@@ -124,7 +124,7 @@ const Index = () => {
           {features.map((f, i) => (
             <div
               key={f.title}
-              className={`bg-card border border-border rounded-2xl p-6 transition-all duration-300 hover:border-primary/40 hover:shadow-lg hover:shadow-primary/5 cursor-default ${i === features.length - 1 ? "sm:col-span-2" : ""}`}
+              className={`bg-card border border-border rounded-2xl p-6 transition-all duration-300 hover:border-primary/40 hover:shadow-lg hover:shadow-primary/5 cursor-default ${i === features.length - 1 ? "sm:col-span-2 sm:max-w-2xl sm:mx-auto sm:w-full" : ""}`}
               onMouseEnter={() => setHoveredFeature(i)}
               onMouseLeave={() => setHoveredFeature(null)}
             >
@@ -158,21 +158,27 @@ const Index = () => {
         </div>
       </section>
 
-      <footer className="border-t border-border py-8 px-6 text-center text-xs text-muted-foreground space-y-2">
-        <p>
-          <a
-            href={GITHUB_REPO}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-primary hover:underline inline-flex items-center gap-1 justify-center"
-          >
-            <Github className="w-3.5 h-3.5" />
-            akshaypalivela/web-helper
-          </a>
-          {" · "}
-          Read the README on GitHub for philosophy, privacy, and limitations.
-        </p>
-        <p>Powered by Gemini Vision · Optional Firecrawl · Experimental software</p>
+      <footer className="border-t border-border py-8 px-6 text-xs text-muted-foreground">
+        <div className="max-w-2xl mx-auto flex flex-col items-center gap-3 text-center">
+          <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 leading-relaxed">
+            <a
+              href={GITHUB_REPO}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary hover:underline inline-flex items-center gap-1.5 font-medium"
+            >
+              <Github className="w-3.5 h-3.5 shrink-0" />
+              akshaypalivela/web-helper
+            </a>
+            <span className="text-border select-none hidden sm:inline" aria-hidden>
+              ·
+            </span>
+            <span className="text-muted-foreground sm:max-w-none max-w-[20rem]">
+              Read the README on GitHub for philosophy, privacy, and limitations.
+            </span>
+          </p>
+          <p className="text-muted-foreground/90">Powered by Gemini Vision · Optional Firecrawl · Experimental software</p>
+        </div>
       </footer>
     </div>
   );
