@@ -99,7 +99,7 @@ function buildFallbackGuideFromRawText(rawText) {
     y: 44,
     description:
       clean ||
-      "_I couldn’t find a solid target on this screen — let’s try another angle._ Use **Next step** after you see the right UI.",
+      'No solid target on this screen. Try another area of the site (nav, back, or settings), then use **Next step** when the right UI is visible.',
     confidence: 0.42,
     elementLabel: 'Next control',
     isMultiStep: false,
@@ -263,6 +263,7 @@ async function analyzePage({
   pageText,
   pageTitle: clientTitle,
   clickableCandidatesText,
+  viewportImageRegion = 'full',
 }) {
   let screenshot;
   let markdown;
@@ -320,7 +321,9 @@ async function analyzePage({
     pageTitle,
     pageUrl: url || '',
     usedLiveViewport,
-    clickableCandidatesText: usedLiveViewport ? clickableCandidatesText : '',
+    clickableCandidatesText:
+      usedLiveViewport && viewportImageRegion === 'full' ? clickableCandidatesText : '',
+    viewportImageRegion,
   });
   const geminiMs = Date.now() - tGem;
 
@@ -357,9 +360,17 @@ async function callGemini({
   pageUrl = '',
   usedLiveViewport,
   clickableCandidatesText,
+  viewportImageRegion = 'full',
 }) {
+  const cropHint =
+    viewportImageRegion === 'top_half' && usedLiveViewport
+      ? ` The screenshot is ONLY the UPPER 50% of the user's viewport (top half). x,y are percentages of THIS CROPPED IMAGE (y=100 is the horizontal midline of the full viewport). Prefer targets in this band. If the correct control is only in the lower half, set confidence below 0.5.`
+      : viewportImageRegion === 'bottom_half' && usedLiveViewport
+        ? ` The screenshot is ONLY the LOWER 50% of the user's viewport. x,y are percentages of THIS CROPPED IMAGE (y=0 is the midline of the full viewport, y=100 is the bottom).`
+        : '';
+
   const coordHint = usedLiveViewport
-    ? `CRITICAL: The image is a pixel-accurate capture of the user's current browser viewport (what they see right now). x and y MUST be the center of the target control as a percentage of THIS image: x = 100 * (centerX / imageWidth), y = 100 * (centerY / imageHeight). Do not guess adjacent nav items — if the user asked for "Explore", the point must be on Explore, not Home. If the step is "use search", the target MUST be the search field, search submit, or magnifying-glass control — never a random sidebar link (e.g. "Job center") unless the user explicitly asked for that page.`
+    ? `CRITICAL: The image is a pixel-accurate capture of the user's current browser viewport (what they see right now). x and y MUST be the center of the target control as a percentage of THIS image: x = 100 * (centerX / imageWidth), y = 100 * (centerY / imageHeight). Do not guess adjacent nav items — if the user asked for "Explore", the point must be on Explore, not Home. When the chosen next step is genuinely to use site search (user asked to search, or RULES say search is last resort), the target MUST be the search field, search submit, or magnifying-glass control — never a random sidebar link (e.g. "Job center") unless the user explicitly asked for that page.${cropHint}`
     : `The image may be from a server-side render and can differ from the user's tab (login, scroll, window size). Prefer anchors from the page text below when they disambiguate. x/y are still viewport percentages of this image.`;
 
   const systemInstruction = `You are a UI Guide. You help users navigate web interfaces step-by-step.
@@ -369,7 +380,9 @@ RULES:
 ${coordHint}
 - elementLabel MUST be the exact visible text, aria-label, or tooltip of the element you target. x/y MUST be the center of THAT same element — never a different widget. If you cannot align label and position, lower confidence.
 - **Search vs browse (government portals, multi-language sites):** Many sites only match search keywords in the **local UI language**. If the user typed intent in English but the portal is German (etc.), do NOT rely on the keyword box alone — prefer a visible **A–Z**, **Authorities A–Z**, **Behörden A–Z**, **Themen**, **Service**, or category browse link that leads toward the service. Mention in description that they may need terms in the site language, or use browse/A–Z instead of search.
-- **When "search" is the right step:** Target only the real search affordance: \`<input>\` in the header, search icon, "Search" / "Suche" button, or opened search overlay — not unrelated left-nav items.
+- **Wrong page or missing option (read user message for session context):** If the user message lists **actions already suggested** or clearly continues a multi-step flow, assume they may have landed where the goal control is **not** visible. **Re-think the path** before suggesting anything. Prefer, in order: **Back** or **breadcrumbs**, a different **top nav** or **sidebar** item, **category / docs / help / support** links, **Account** or **Settings** submenus, **More** menus, or **A–Z / browse** paths. Set **isMultiStep** true when useful; in **overallPlan** and **description**, briefly say that the previous area did not show the target and what you are trying instead (e.g. "That screen did not have X; open Settings then …").
+- **Site search is LAST RESORT:** Do **not** target the header **search field**, **search icon**, **Cmd/Ctrl-K** palette, or **Search** button unless at least one of these is true: (1) you have no reasonable browse or nav path left on this page toward the goal, (2) the user **explicitly** asked to search, or (3) after checking nav, back, and categories, search is clearly the only practical next step. If you do use search as fallback, **say so in description** in plain language (e.g. "No nav link to X here, so search is the fallback; try keywords …"). Prefer **lower confidence** when you are defaulting to search after a dead-end page.
+- **When search truly is the next step:** Target only the real search affordance: \`<input>\` in the header, search icon, "Search" / "Suche" button, or opened search overlay — not unrelated left-nav items.
 - For goals that need several screens (e.g. "make repo private"), set isMultiStep true, give a short overallPlan (2–4 sentences), but still output only ONE action for what is visible NOW. stepSummary is one past-tense line (e.g. "Opened Settings menu") for history.
 - Return ONLY a valid JSON object. No markdown fences, no explanation outside JSON.
 - The JSON must have these fields:

@@ -93,6 +93,61 @@ function downscaleDataUrlForGemini(dataUrl, maxWidth = 1536, quality = 0.88) {
   });
 }
 
+/** Vertical slice of a data URL image; yStartFrac/yEndFrac in [0,1] relative to full height. */
+function cropDataUrlVerticalSlice(dataUrl, yStartFrac, yEndFrac) {
+  if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image')) {
+    return Promise.resolve(dataUrl);
+  }
+  const ys = Math.max(0, Math.min(1, yStartFrac));
+  const ye = Math.max(ys, Math.min(1, yEndFrac));
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const w = img.naturalWidth;
+        const h = img.naturalHeight;
+        if (!w || !h) {
+          resolve(dataUrl);
+          return;
+        }
+        const sy = Math.round(ys * h);
+        const sh = Math.max(1, Math.round(ye * h) - sy);
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = sh;
+        const ctx = c.getContext('2d');
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+        ctx.drawImage(img, 0, sy, w, sh, 0, 0, w, sh);
+        resolve(c.toDataURL('image/jpeg', 0.88));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+function setAnalyzeStatus(typingRowEl, text) {
+  const el = typingRowEl?.querySelector?.('.analyze-status');
+  if (el) el.textContent = text;
+}
+
+/** Map model y (0–100 within crop) to full viewport y; cropped passes must not use candidateIndex. */
+function mapPhaseResponseToViewport(res, half) {
+  if (!res || typeof res !== 'object') return res;
+  const out = { ...res, candidateIndex: -1 };
+  let y = Number(out.y);
+  if (!Number.isFinite(y)) y = 22;
+  y = Math.max(0, Math.min(100, y));
+  if (half === 'top') out.y = y * 0.5;
+  else if (half === 'bottom') out.y = 50 + y * 0.5;
+  return out;
+}
+
 function getClickableCandidatesFromTab(tabId) {
   return new Promise((resolve) => {
     if (!tabId) {
@@ -189,7 +244,7 @@ document.getElementById('next-step-btn').addEventListener('click', async () => {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (tabs[0]?.id) state.guidanceTabId = tabs[0].id;
   });
-  addMessage('assistant', '**Next step** — analyzing the current page…');
+  addMessage('assistant', '**Next step:** analyzing this page…');
   await analyzeCurrentPage(buildContinuationPrompt());
 });
 
@@ -211,6 +266,7 @@ document.getElementById('reset-guidance-btn').addEventListener('click', () => {
   state.stickyManualPause = false;
   hideContextStrip();
   updateGuidanceBar();
+  removeStaleAnalyzeTypingUI();
   addMessage('assistant', 'Guidance reset. Describe a **new goal** when you are ready.');
 });
 
@@ -239,7 +295,7 @@ document.getElementById('continue-here-btn').addEventListener('click', async () 
   state.taskCompletionPaused = false;
   state.lastGuidanceUrl = '';
   hideContextStrip();
-  addMessage('assistant', '**Continuing** your goal on **this** tab…');
+  addMessage('assistant', '**Continuing** your goal on this tab…');
   const prompt = state.guidanceStepsDone.length ? buildContinuationPrompt() : state.lastGoal;
   await analyzeCurrentPage(prompt);
 });
@@ -421,7 +477,7 @@ async function init() {
   if (sessionEndedByPanelClose) {
     addMessage(
       'assistant',
-      'You closed the side panel — **guidance is stopped** (no auto steps or highlights). Chat above is unchanged. Send a **new message** when you want to start again.'
+      'You closed the side panel, so **guidance is paused** (no auto steps or highlights). Your chat is still here. Send a **new message** when you want to start again.'
     );
   }
   updatePageContext();
@@ -553,7 +609,7 @@ function scheduleGuidanceFollowUp() {
       if (state.guidanceTabId != null && t.id !== state.guidanceTabId) return;
       if (t.url === state.lastGuidanceUrl) return;
       if (state.currentDomain && prevDomain && state.currentDomain !== prevDomain) {
-        addMessage('assistant', `🌐 You're on **${state.currentDomain}** now — continuing your guided goal.`);
+        addMessage('assistant', `🌐 You are on **${state.currentDomain}** now. Continuing your guided goal.`);
       }
       const prompt =
         state.guidanceStepsDone.length > 0 ? buildContinuationPrompt() : state.lastGoal;
@@ -582,8 +638,8 @@ function scheduleDomGuidanceFollowUp(fromInteraction) {
       addMessage(
         'assistant',
         fromInteraction
-          ? '_You interacted with the page — updating the **next step**…_'
-          : '_The page layout changed — fetching the **next step** for your goal…_'
+          ? 'You used the page, so we are updating your **next step**…'
+          : 'The page changed a bit. Getting your **next step**…'
       );
       analyzeCurrentPage(buildContinuationPrompt());
     });
@@ -608,10 +664,39 @@ function renderJourney() {
 }
 
 function confidenceToneLine(conf) {
-  if (conf >= 0.7) return '_I’m confident this is the right control — I’ll highlight it for you._';
-  if (conf >= 0.4) return '_This looks like the right place; wording can differ by site._';
-  if (conf > 0) return '_Sites use different labels for the same thing — this is our best guess._';
+  if (conf >= 0.7) return 'Strong match. We will try to **highlight** it on the page.';
+  if (conf >= 0.4) return 'Probably the right control, but sites word things differently.';
+  if (conf > 0) return 'Best guess. Sites often use different names for the same action.';
   return '';
+}
+
+function userMessageIsContinuation(userMessage) {
+  return (
+    typeof userMessage === 'string' &&
+    /CONTINUATION\s*-\s*same overall task/i.test(userMessage)
+  );
+}
+
+/** Header / global search affordance (not every button whose label contains "search"). */
+function responseTargetsSiteSearch(elementLabel, description) {
+  const label = String(elementLabel || '').toLowerCase().trim();
+  const desc = String(description || '').toLowerCase();
+  if (!label && !desc) return false;
+  if (/site search|search bar|search field|search box|global search|⌘k|cmd\+k|ctrl\+k/.test(desc)) {
+    return true;
+  }
+  if (label === 'search' || label === 'suche') {
+    return true;
+  }
+  if (/\bsearch\b/.test(label) && label.length <= 28) {
+    return true;
+  }
+  return false;
+}
+
+function userGoalMentionsSearchExplicitly() {
+  const g = `${state.guidanceGoal || ''} ${state.lastGoal || ''}`.toLowerCase();
+  return /\bsearch(\s+the|\s+for|\s+box|\s+bar)?\b/.test(g) || /\buse\s+search\b/.test(g);
 }
 
 function buildContinuationPrompt() {
@@ -621,9 +706,9 @@ function buildContinuationPrompt() {
       ? state.guidanceStepsDone.map((s, i) => `${i + 1}. ${s}`).join('\n')
       : '(none yet — infer from the goal and page)';
   const deep = state.deepGuidanceOptIn
-    ? '\n\n**Deep guidance is ON** — continue through forms, OAuth, vendor dashboards, or new tabs (e.g. API keys on another product) until the user can complete the goal.'
+    ? '\n\n**Deep guidance is ON** - continue through forms, OAuth, vendor dashboards, or new tabs (e.g. API keys on another product) until the user can complete the goal.'
     : '';
-  return `CONTINUATION — same overall task.\n\nOriginal goal: "${goal}"\n\nActions already suggested in this session (do not repeat; choose the NEXT control on screen now):\n${done}${deep}\n\nCRITICAL: If a menu, dialog, or dropdown is ALREADY OPEN in the screenshot, do NOT target the opener/avatar again — target the row or button INSIDE that UI (e.g. "Switch account", "Sponsors") that matches the goal.\n\nOutput only one click on the CURRENT viewport. If the next control is not visible, explain where to navigate and use lower confidence.`;
+  return `CONTINUATION - same overall task.\n\nOriginal goal: "${goal}"\n\nActions already suggested in this session (do not repeat those clicks; choose the NEXT control on screen now):\n${done}${deep}\n\nCRITICAL: If a menu, dialog, or dropdown is ALREADY OPEN in the screenshot, do NOT target the opener/avatar again - target the row or button INSIDE that UI (e.g. "Switch account", "Sponsors") that matches the goal.\n\nWRONG-PAGE RECOVERY: If this viewport does NOT show the goal option but earlier steps already moved the user, the last area was probably wrong or incomplete. Do NOT default to the site search box. First try another path: Back, breadcrumbs, a different nav section, categories, Docs/Help, Account/Settings, or browse/A-Z. Only point at search if those paths are exhausted or missing, and say clearly in description that search is a last resort and why.\n\nOutput only one click on the CURRENT viewport. If the next control is not visible, explain where to navigate and use lower confidence.`;
 }
 
 function updateGuidanceBar() {
@@ -640,7 +725,7 @@ function updateGuidanceBar() {
   const short = g.length > 52 ? `${g.slice(0, 52)}…` : g;
   status.textContent = n
     ? `Multi-step · ${n} step(s) logged · ${short}`
-    : `Goal: ${short} — after you click, press **Next step**.`;
+    : `Goal: ${short}. After you click, press **Next step**.`;
 }
 
 // Chat
@@ -668,7 +753,7 @@ chatForm.addEventListener('submit', async (e) => {
     state.pauseAutoAnalysis = false;
     addMessage(
       'assistant',
-      '**Continuing** — I’ll help you finish the flow (including new tabs or vendor sites when needed).'
+      '**Continuing:** I will help you finish the flow, including new tabs or vendor sites when needed.'
     );
     await analyzeCurrentPage(buildContinuationPrompt());
     return;
@@ -679,7 +764,7 @@ chatForm.addEventListener('submit', async (e) => {
     state.pauseAutoAnalysis = true;
     addMessage(
       'assistant',
-      'Sounds good — I’ll stop auto steps here. Send a **new message** anytime you want more help.'
+      'Sounds good. I will stop auto steps here. Send a **new message** anytime you want more help.'
     );
     return;
   }
@@ -700,7 +785,8 @@ chatForm.addEventListener('submit', async (e) => {
   syncGuidanceEpochToStorage();
   hideContextStrip();
   updateGuidanceBar();
-  addMessage('assistant', `🔍 Searching for **"${text}"** on this page...`);
+  removeStaleAnalyzeTypingUI();
+  addMessage('assistant', `🔍 Looking for **"${text}"** on this page…`);
   await analyzeCurrentPage(text);
 });
 
@@ -711,6 +797,7 @@ async function analyzeCurrentPage(userMessage) {
   }
   state.activeAnalyzeEpoch = runEpoch;
   state.analyzeInFlight += 1;
+  removeStaleAnalyzeTypingUI();
   const typingEl = showTyping();
   chrome.runtime.sendMessage({ type: 'CLEAR_HIGHLIGHTS' });
 
@@ -726,7 +813,7 @@ async function analyzeCurrentPage(userMessage) {
     const url = pageInfo?.url || state.currentUrl;
     if (!url || url.startsWith('chrome://')) {
       removeEl(typingEl);
-      addMessage('assistant', '⚠️ Navigate to a website first — I can\'t read Chrome internal pages.');
+      addMessage('assistant', '⚠️ Open a normal website first. I cannot read Chrome internal pages.');
       return;
     }
 
@@ -784,25 +871,130 @@ async function analyzeCurrentPage(userMessage) {
       return;
     }
 
-    const tAnalyze0 = performance.now();
-    const response = await new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({
-        type: 'ANALYZE_PAGE',
-        payload: {
-          url,
-          userMessage,
-          firecrawlKey: state.firecrawlKey,
-          geminiKey: state.geminiKey,
-          clientScreenshot,
-          pageText,
-          pageTitle: pageInfo?.title || activeTab?.title || '',
-          clickableCandidatesText,
-        },
-      }, (res) => {
-        if (res?.error && !res.success) reject(new Error(res.error));
-        else resolve(res);
+    let scanSummaryLine = '';
+    if (clientScreenshot) {
+      setAnalyzeStatus(typingEl, 'Scanning top 50% of viewport…');
+    } else {
+      setAnalyzeStatus(
+        typingEl,
+        'No live screenshot. Using page text or a server snapshot…'
+      );
+      scanSummaryLine =
+        '📐 **Viewport:** No live screenshot, so we did not split the screen into top and bottom scans.';
+    }
+
+    const baseAnalyzePayload = {
+      url,
+      userMessage,
+      firecrawlKey: state.firecrawlKey,
+      geminiKey: state.geminiKey,
+      pageText,
+      pageTitle: pageInfo?.title || activeTab?.title || '',
+    };
+
+    const runAnalyze = (extra) =>
+      new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage(
+          { type: 'ANALYZE_PAGE', payload: { ...baseAnalyzePayload, ...extra } },
+          (res) => {
+            if (res?.error && !res.success) reject(new Error(res.error));
+            else resolve(res);
+          }
+        );
       });
-    });
+
+    const tAnalyze0 = performance.now();
+    let response;
+    /** Run bottom half only if top is uncertain or fell back to text-only guidance. */
+    const PHASE2_CONF_THRESHOLD = 0.58;
+    /** If both halves stay below this after comparison, one full-viewport vision pass disambiguates. */
+    const WEAK_SPLIT_MAX_CONF = 0.44;
+    /** Full pass must beat the best half by this margin to replace the pick. */
+    const FULL_VIEWPORT_MARGIN = 0.07;
+
+    if (!clientScreenshot) {
+      response = await runAnalyze({ clientScreenshot, clickableCandidatesText });
+    } else {
+      const topImg = await cropDataUrlVerticalSlice(clientScreenshot, 0, 0.5);
+      const resTop = await runAnalyze({
+        clientScreenshot: topImg,
+        clickableCandidatesText,
+        viewportImageRegion: 'top_half',
+      });
+      if (runEpoch !== state.guidanceEpoch) {
+        removeEl(typingEl);
+        return;
+      }
+
+      const cTopRaw = Number(resTop.confidence);
+      const cTop = Number.isFinite(cTopRaw) ? cTopRaw : 0;
+      const needBottom =
+        cTop < PHASE2_CONF_THRESHOLD || Boolean(resTop.usedFallback);
+
+      if (!needBottom) {
+        response = mapPhaseResponseToViewport(resTop, 'top');
+        scanSummaryLine = `📐 **Viewport:** Top half only (${Math.round(cTop * 100)}% confidence). Bottom half not needed.`;
+      } else {
+        setAnalyzeStatus(typingEl, 'Scanning bottom 50% of viewport…');
+        const botImg = await cropDataUrlVerticalSlice(clientScreenshot, 0.5, 1);
+        const resBot = await runAnalyze({
+          clientScreenshot: botImg,
+          clickableCandidatesText,
+          viewportImageRegion: 'bottom_half',
+        });
+        if (runEpoch !== state.guidanceEpoch) {
+          removeEl(typingEl);
+          return;
+        }
+
+        const cBotRaw = Number(resBot.confidence);
+        const cBot = Number.isFinite(cBotRaw) ? cBotRaw : 0;
+        const topMapped = mapPhaseResponseToViewport(resTop, 'top');
+        const botMapped = mapPhaseResponseToViewport(resBot, 'bottom');
+        const winner = pickSplitViewportWinner(resTop, resBot, topMapped, botMapped);
+        response = winner.mapped;
+        const maxSplit = Math.max(cTop, cBot);
+        const pickNote =
+          winner.pick === 'fallback'
+            ? ' Picked the side that pointed at a real control when scores were close.'
+            : '';
+        const winHalf = winner.halfLabel === 'lower' ? 'Lower' : 'Upper';
+        const otherPct =
+          winner.halfLabel === 'lower' ? Math.round(cTop * 100) : Math.round(cBot * 100);
+        scanSummaryLine = `📐 **Viewport:** Checked top and bottom. **${winHalf} half** looked best (${Math.round(winner.choiceConf * 100)}% vs ${otherPct}% on the other).${pickNote}`;
+
+        const gt = resTop.timings?.geminiMs;
+        const gb = resBot.timings?.geminiMs;
+        let sumG =
+          (typeof gt === 'number' ? gt : 0) + (typeof gb === 'number' ? gb : 0);
+
+        if (maxSplit < WEAK_SPLIT_MAX_CONF) {
+          setAnalyzeStatus(typingEl, 'Split view was unclear. Checking the full screen…');
+          const resFull = await runAnalyze({
+            clientScreenshot,
+            clickableCandidatesText,
+            viewportImageRegion: 'full',
+          });
+          if (runEpoch !== state.guidanceEpoch) {
+            removeEl(typingEl);
+            return;
+          }
+          const cFullRaw = Number(resFull.confidence);
+          const cFull = Number.isFinite(cFullRaw) ? cFullRaw : 0;
+          const gf = resFull.timings?.geminiMs;
+          sumG += typeof gf === 'number' ? gf : 0;
+          if (cFull > maxSplit + FULL_VIEWPORT_MARGIN) {
+            response = { ...resFull };
+            scanSummaryLine = `📐 **Viewport:** Full screen (${Math.round(cFull * 100)}% confidence). Split halves were weak (top ${Math.round(cTop * 100)}%, bottom ${Math.round(cBot * 100)}%).`
+          } else {
+            scanSummaryLine += ` Full screen (${Math.round(cFull * 100)}%) was not clearly better, so we kept the split pick.`
+          }
+        }
+
+        response = { ...response, timings: { ...response.timings, geminiMs: sumG } };
+      }
+    }
+
     const analyzeWallMs = performance.now() - tAnalyze0;
     igLog('timings', {
       captureMs: Math.round(captureMs),
@@ -839,25 +1031,44 @@ async function analyzeCurrentPage(userMessage) {
 
     let msg = '';
     if (usedFallback) {
-      msg = `🔁 **I couldn’t find a clean spot here — let’s try another way.**\n\n${response.description}\n\n_Tap **Next step** from this screen, or describe what you see._`;
+      msg = `🔁 **No clear click target here.**\n\n${response.description}\n\nUse **Next step** on this screen, or tell me what you see.`
     } else if (conf >= 0.7) {
-      msg = `🎯 **${response.elementLabel}** — ${response.pageTitle || 'this page'}\n\n${response.description}\n\n${tone}`;
+      msg = `🎯 **${response.elementLabel}** (${response.pageTitle || 'this page'})\n\n${response.description}\n\n${tone}`
     } else if (conf >= 0.4) {
-      msg = `🤔 **${response.elementLabel}** (best match here)\n\n${response.description}\n\n${tone}`;
+      msg = `🤔 **${response.elementLabel}** (best match we see)\n\n${response.description}\n\n${tone}`
     } else if (conf > 0) {
-      msg = `🔎 **${response.elementLabel}** — tentative\n\n${response.description}\n\n${tone}`;
+      msg = `🔎 **${response.elementLabel}** (tentative)\n\n${response.description}\n\n${tone}`
     } else {
-      msg = `❓ ${response.description}\n\n_I couldn’t pin this down — try **Next step** or a shorter question._`;
+      msg = `❓ ${response.description}\n\nTry **Next step** or ask a shorter question.`
     }
     if (response.isMultiStep && response.overallPlan) {
-      msg += `\n\n📋 **Plan:** ${response.overallPlan}`;
+      msg += `\n\n📋 **Steps ahead**\n${response.overallPlan}`;
     }
     if (conf > 0 && (state.guidanceStepsDone.length > 1 || response.isMultiStep)) {
-      msg += `\n\n_Tap **Next step** in the bar above after you perform this action._`;
+      msg += `\n\nWhen you are done, tap **Next step** in the bar above.`
     }
     if (response.usedRemoteScrape) {
       msg +=
-        '\n\n_Using a **server snapshot** of the page — it may not match your logged-in tab._';
+        '\n\nUsing a **server snapshot**, which may not match your logged-in tab.';
+    }
+    const modelExplainedRethinkOrSearchFallback =
+      /last resort|exhausted|wrong (page|screen|area)|re-?think|did not show|doesn'?t show|no (clear )?link|try (instead|going)|go back|breadcrumb/i.test(
+        `${response.description || ''} ${response.overallPlan || ''}`
+      );
+    if (
+      userMessageIsContinuation(userMessage) &&
+      state.guidanceStepsDone.length >= 2 &&
+      conf > 0 &&
+      !usedFallback &&
+      !userGoalMentionsSearchExplicitly() &&
+      responseTargetsSiteSearch(response.elementLabel, response.description) &&
+      !modelExplainedRethinkOrSearchFallback
+    ) {
+      msg +=
+        '\n\n**About search:** Prefer Back, main nav, Settings, or Help/Docs if they get you closer. Site search is a backup when this screen does not show a direct path.';
+    }
+    if (scanSummaryLine) {
+      msg = `${scanSummaryLine}\n\n${msg}`;
     }
     addMessage('assistant', msg);
 
@@ -873,7 +1084,7 @@ async function analyzeCurrentPage(userMessage) {
       state.pauseAutoAnalysis = true;
       addMessage(
         'assistant',
-        '✅ **Looks like you’re in the right area.**\n\nWant help **finishing** this (forms, OAuth, API keys, or another site)? Reply **yes** to keep going, or **done** to stop auto steps here.'
+        '✅ **You seem to be in the right area.**\n\nWant help **finishing** (forms, sign-in, API keys, or another site)? Reply **yes** to keep going, or **done** to stop auto steps here.'
       );
     }
 
@@ -890,11 +1101,11 @@ async function analyzeCurrentPage(userMessage) {
       igLog('highlight', { ms: Math.round(performance.now() - tHl0), ok: hl.ok });
       if (runEpoch !== state.guidanceEpoch) return;
       if (hl.ok) {
-        addMessage('assistant', '🟠 I\'ve placed a **ghost marker** on the page where you should click.');
+        addMessage('assistant', '🟠 I added a **ghost marker** on the page where you should click.');
       } else {
         addMessage(
           'assistant',
-          `⚠️ Could not draw the on-page marker (${hl.error || 'unknown'}). Follow the suggestion above — expand any collapsed sidebar or menu first if the item is hidden.`
+          `⚠️ Could not draw the on-page marker (${hl.error || 'unknown'}). Follow the text above. Open any collapsed sidebar or menu if the item is hidden.`
         );
       }
     }
@@ -939,12 +1150,15 @@ function addMessage(role, text, silent) {
 
 function showTyping() {
   const div = document.createElement('div');
-  div.className = 'msg assistant';
+  div.className = 'msg assistant analyze-typing';
   div.innerHTML = `
     <div class="msg-avatar">
       <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 12h3v8h6v-6h2v6h6v-8h3L12 2z"/></svg>
     </div>
-    <div class="msg-bubble"><div class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div></div>
+    <div class="msg-bubble">
+      <div class="analyze-status">Analyzing…</div>
+      <div class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>
+    </div>
   `;
   chatMessages.appendChild(div);
   chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -952,6 +1166,41 @@ function showTyping() {
 }
 
 function removeEl(el) { el?.remove(); }
+
+/** Drop in-progress analyze rows so a new goal does not stack loading bubbles. */
+function removeStaleAnalyzeTypingUI() {
+  const root = document.getElementById('chat-messages');
+  if (!root) return;
+  root.querySelectorAll('.msg.assistant.analyze-typing').forEach((el) => el.remove());
+}
+
+/**
+ * Choose top vs bottom half using confidence, with fallback awareness (non-fallback wins when close).
+ */
+function pickSplitViewportWinner(resTop, resBot, topMapped, botMapped) {
+  const cTop = (() => {
+    const n = Number(resTop?.confidence);
+    return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0;
+  })();
+  const cBot = (() => {
+    const n = Number(resBot?.confidence);
+    return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0;
+  })();
+  const fbT = Boolean(resTop?.usedFallback);
+  const fbB = Boolean(resBot?.usedFallback);
+
+  if (fbT && !fbB && cBot >= cTop - 0.12) {
+    return { mapped: botMapped, halfLabel: 'lower', choiceConf: cBot, pick: 'fallback' };
+  }
+  if (!fbT && fbB && cTop >= cBot - 0.12) {
+    return { mapped: topMapped, halfLabel: 'upper', choiceConf: cTop, pick: 'fallback' };
+  }
+
+  if (cBot > cTop) {
+    return { mapped: botMapped, halfLabel: 'lower', choiceConf: cBot, pick: 'confidence' };
+  }
+  return { mapped: topMapped, halfLabel: 'upper', choiceConf: cTop, pick: 'confidence' };
+}
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function formatMd(t) {
   const badges = [];
