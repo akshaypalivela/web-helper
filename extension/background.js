@@ -351,6 +351,23 @@ function inferImageMimeFromInput(screenshot) {
   return 'image/png';
 }
 
+/** Nudge the model when URL + intent suggest Git OAuth, not marketplace tiles. */
+function extraIntentContextForPrompt(pageUrl, userMessage) {
+  const url = String(pageUrl || '').toLowerCase();
+  const msg = String(userMessage || '').toLowerCase();
+  const wantsGitConnect =
+    /github|gitlab|bitbucket|\bgit\b.*(connect|link|account|repo)|connect.*(github|gitlab)|link.*(github|gitlab)|authorize.*(github|gitlab)/.test(
+      msg
+    );
+  if (!wantsGitConnect) return '';
+  const hosting =
+    /vercel\.com|\.vercel\.app|netlify\.app|netlify\.com|railway\.app|render\.com|pages\.dev|cloudflare\.com/.test(
+      url
+    );
+  if (!hosting) return '';
+  return '\n[Context: User wants to connect or manage their Git provider account for deploys. Integrations Marketplace product cards for databases or storage are not the GitHub login path. Prefer Settings, Git, Import project, or a visible Connect GitHub flow.]\n';
+}
+
 async function callGemini({
   geminiKey,
   screenshot,
@@ -407,7 +424,8 @@ ${coordHint}
 - If the user asks for "integrations" / HRIS / apps: elementLabel must be the real nav text (e.g. "Integrations", "Connected apps") if it appears anywhere in the page text, even when that row is off-screen in a scrollable sidebar — the extension scrolls to it.
 - If the control is inside a collapsed sidebar group, dropdown, or <details>, set isMultiStep true: overallPlan should say to expand/open that section first; stepSummary for this step names that parent (e.g. "Open Playground section"); elementLabel should match the visible expander control.
 - **GitHub — Sponsors / GitHub Sponsors:** Prefer the **public profile** (\`github.com/<username>\`, not \`/settings/profile\` or account settings). Look for a **Sponsors** tab or link next to Overview/Repositories, or a **Sponsor** button on the README — those are the right targets. **Do NOT** use **Edit profile** as the primary path for enabling GitHub Sponsors (that page is bio/settings, not sponsorship setup). **Do NOT** highlight **Contribution activity**, the contribution graph, or random activity feed text for "add sponsors" / "sponsors" — those are wrong. If the user is stuck on settings or edit profile, set isMultiStep true and in overallPlan say to open the **public profile** from the avatar menu or go to \`/<username>\` without \`/settings\`, then click **Sponsors**.
-- If a numbered **Viewport controls** list is provided and one row clearly matches the next action, set **candidateIndex** to that index and copy **elementLabel** exactly from that row’s quoted text. **Only** set candidateIndex when that row is the true target; if unsure between rows, set **candidateIndex** to **-1** and rely on accurate x/y from the screenshot (wrong index breaks the highlight). Never set candidateIndex for a different control than elementLabel describes.
+- **Connect GitHub / GitLab / Bitbucket (hosting and CI: Vercel, Netlify, Railway, Render, Cloudflare Pages, etc.):** The user wants to link **their Git provider account** for repos and deploys. Valid targets include **Team or Account Settings → Git** (or **Git Integration**, **Connected Git Accounts**), **Import** / **Add New Project → Import**, **Continue with GitHub**, or a visible **Connect Git** on the dashboard. **Do NOT** treat **Integrations Marketplace** or **Add Integration** **product cards** (databases, storage, observability, e.g. SingleStore, Pinecone, Turso, Astra) as "connect GitHub" — those **Integrate** / **Add** actions install **that vendor's product**, not OAuth to GitHub. If the viewport is mostly third-party **product tiles** and the user asked to connect GitHub: set **isMultiStep** true, **confidence** at most **0.4** unless a real Git-connect control is visible, and in **description** explain that marketplace tiles are the wrong place; target **Settings** (avatar/menu), **Back**, **Dashboard** / **Projects**, or **Import** if shown — never a random unrelated product card. **elementLabel** must match what you actually target (e.g. "Settings", "Import Project"), not a misleading label about GitHub on the wrong widget.
+- If a numbered **Viewport controls** list is provided and one row clearly matches the next action, set **candidateIndex** to that index and copy **elementLabel** exactly from that row’s quoted text. **Only** set candidateIndex when that row is the true target; if unsure between rows, set **candidateIndex** to **-1** and rely on accurate x/y from the screenshot (wrong index breaks the highlight). Never set candidateIndex for a different control than elementLabel describes. **For "connect GitHub" on marketplace grids, prefer candidateIndex -1** unless a row is explicitly a Git-provider connect action.
 - ALWAYS return valid JSON for every request — never an empty response.`;
 
   const candidateBlock =
@@ -417,9 +435,10 @@ ${coordHint}
 
   // Build the request parts
   const urlLine = pageUrl ? `Page URL: ${pageUrl}\n\n` : '';
+  const intentHint = extraIntentContextForPrompt(pageUrl, userMessage);
   const parts = [
     {
-      text: `${urlLine}User intent: "${userMessage}"\n\nPage title: "${pageTitle}"\n\nPage content (markdown):\n${markdown.substring(0, 4500)}${candidateBlock}`,
+      text: `${urlLine}${intentHint}User intent: "${userMessage}"\n\nPage title: "${pageTitle}"\n\nPage content (markdown):\n${markdown.substring(0, 4500)}${candidateBlock}`,
     },
   ];
 
