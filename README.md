@@ -4,7 +4,7 @@
 
 > **Work in progress.** Behavior, accuracy, and latency will change. This is experimental—not a substitute for reading terms, permissions, or security prompts on the sites you use.
 
-**Live site:** [https://www.across.help/](https://www.across.help/)
+**Live site:** [across.help](https://across.help/)
 
 ## Why
 
