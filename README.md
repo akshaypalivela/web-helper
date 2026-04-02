@@ -90,7 +90,3 @@ Viewport and text are sent to the **configured AI provider**. Keys are stored **
 ## Contributing
 
 I welcome issues and PRs. Expect rough edges while this is **WIP**.
-
-## License
-
-See `LICENSE` if present; otherwise **TBD**.
