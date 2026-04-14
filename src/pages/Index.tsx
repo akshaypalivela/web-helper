@@ -1,5 +1,5 @@
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Download,
   Shield,
@@ -13,22 +13,6 @@ import {
 } from "lucide-react";
 
 const GITHUB_REPO = "https://github.com/akshaypalivela/web-helper";
-
-const downloadExtension = () => {
-  fetch("/integration-guide.zip")
-    .then((res) => {
-      if (!res.ok) throw new Error(`Download failed: ${res.status}`);
-      return res.blob();
-    })
-    .then((blob) => {
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "integration-guide.zip";
-      a.click();
-      URL.revokeObjectURL(a.href);
-    })
-    .catch((err) => alert(err.message));
-};
 
 const features = [
   {
@@ -72,9 +56,118 @@ const steps = [
 
 const Index = () => {
   const [hoveredFeature, setHoveredFeature] = useState<number | null>(null);
+  const [showGuidePrompt, setShowGuidePrompt] = useState(false);
+  const [highlightDownloadCta, setHighlightDownloadCta] = useState(false);
+  const [showInstallPrompt, setShowInstallPrompt] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setShowGuidePrompt(true);
+    }, 5000);
+
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  const startZipDownload = async () => {
+    setIsDownloading(true);
+    setDownloadError(null);
+
+    try {
+      const res = await fetch("/integration-guide.zip");
+      if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "integration-guide.zip";
+      a.click();
+      URL.revokeObjectURL(a.href);
+
+      if (highlightDownloadCta) {
+        setHighlightDownloadCta(false);
+        setShowInstallPrompt(true);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Download failed";
+      setDownloadError(message);
+    } finally {
+      setIsDownloading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-background text-foreground">
+      {(showGuidePrompt || showInstallPrompt) && (
+        <div className="fixed inset-x-4 bottom-4 z-50 sm:inset-x-auto sm:right-6 sm:bottom-auto sm:top-24 pointer-events-none">
+          <div className="pointer-events-auto w-full sm:w-[26rem] rounded-2xl border border-primary/30 bg-card shadow-2xl shadow-primary/20">
+            {showGuidePrompt && (
+              <div className="p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary/80 mb-2">Quick walkthrough</p>
+                <h3 className="text-lg font-semibold mb-2">Show me how it works?</h3>
+                <p className="text-sm text-muted-foreground mb-4">
+                  I will point to the download button first. Click it, and then I will tell you how to install it in Chromium.
+                </p>
+                {downloadError && (
+                  <p className="text-xs text-destructive mb-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2">
+                    {downloadError}
+                  </p>
+                )}
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowGuidePrompt(false);
+                      setShowInstallPrompt(false);
+                      setDownloadError(null);
+                      setHighlightDownloadCta(true);
+                    }}
+                    className="inline-flex items-center justify-center rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-70 disabled:cursor-not-allowed"
+                  >
+                    Yes, show me
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowGuidePrompt(false)}
+                    className="inline-flex items-center justify-center rounded-xl border border-border px-4 py-2.5 text-sm font-medium text-muted-foreground hover:bg-secondary"
+                  >
+                    Not now
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {showInstallPrompt && (
+              <div className="p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary/80 mb-2">Next step</p>
+                <h3 className="text-lg font-semibold mb-2">Tell me how to install it</h3>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Open <span className="font-medium text-foreground">chrome://extensions</span>, turn on Developer mode, then click{" "}
+                  <span className="font-medium text-foreground">Load unpacked</span> and select the unzipped extension folder.
+                </p>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <button
+                    type="button"
+                    onClick={() => window.open("https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world#load-unpacked", "_blank", "noopener,noreferrer")}
+                    className="inline-flex items-center justify-center rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
+                  >
+                    Open unpack guide
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowInstallPrompt(false)}
+                    className="inline-flex items-center justify-center rounded-xl border border-border px-4 py-2.5 text-sm font-medium text-muted-foreground hover:bg-secondary"
+                  >
+                    Got it
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       <section className="relative overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-b from-primary/10 via-transparent to-transparent" />
         <div className="relative max-w-4xl mx-auto px-6 pt-24 pb-16 text-center">
@@ -97,14 +190,24 @@ const Index = () => {
             Between “do everything for me” and a single product’s help bot: <strong className="text-foreground">one step at a time</strong>, on the <strong className="text-foreground">live</strong> screen.
           </p>
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3 w-full max-w-md sm:max-w-none mx-auto">
-            <button
-              type="button"
-              onClick={downloadExtension}
-              className="inline-flex items-center justify-center gap-2.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold px-8 py-4 rounded-2xl text-base transition-all hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-primary/25 min-h-[3.5rem] w-full sm:w-auto"
-            >
-              <Download className="w-5 h-5 shrink-0" />
-              Download extension (zip)
-            </button>
+            <div className="relative w-full sm:w-auto">
+              {highlightDownloadCta && (
+                <div className="absolute -top-12 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-primary/40 bg-card px-3 py-1.5 text-xs font-medium text-primary shadow-lg shadow-primary/20">
+                  Step 1: Click this download button
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={startZipDownload}
+                disabled={isDownloading}
+                className={`inline-flex items-center justify-center gap-2.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold px-8 py-4 rounded-2xl text-base transition-all hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-primary/25 min-h-[3.5rem] w-full sm:w-auto disabled:opacity-75 disabled:cursor-not-allowed ${
+                  highlightDownloadCta ? "ring-4 ring-primary/60 ring-offset-4 ring-offset-background animate-pulse" : ""
+                }`}
+              >
+                <Download className="w-5 h-5 shrink-0" />
+                {isDownloading ? "Downloading..." : "Download extension (zip)"}
+              </button>
+            </div>
             <a
               href={GITHUB_REPO}
               target="_blank"
