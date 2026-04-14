@@ -219,6 +219,9 @@ const Index = () => {
               <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-70" />
             </a>
           </div>
+          <p className="text-xs text-muted-foreground mt-4">
+            Currently supports Gemini. More GPT connections are coming soon.
+          </p>
         </div>
       </section>
 
