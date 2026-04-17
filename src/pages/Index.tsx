@@ -187,7 +187,8 @@ const Index = () => {
             A browser sidebar that points to the <strong className="text-foreground font-semibold">next click</strong> on the page you’re already on—so you learn the UI instead of handing the whole flow to an agent.
           </p>
           <p className="text-sm text-muted-foreground max-w-2xl mx-auto mb-10 leading-relaxed">
-            Between “do everything for me” and a single product’s help bot: <strong className="text-foreground">one step at a time</strong>, on the <strong className="text-foreground">live</strong> screen.
+            Setting up an integration or hunting for a buried setting? Skip the screenshot-to-chat loop. This points to the{" "}
+            <strong className="text-foreground">next click</strong> in your actual UI.
           </p>
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3 w-full max-w-md sm:max-w-none mx-auto">
             <div className="relative w-full sm:w-auto">
