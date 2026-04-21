@@ -281,7 +281,7 @@
         </div>
         <h2>Integration Guide</h2>
         <p>Describe a multi-step goal (e.g. make a repo private) — I’ll show one click at a time. Use <strong>Next step</strong> after each action.</p>
-        <p style="font-size:11px;color:var(--text-dim)">Add your <strong>Gemini</strong> API key in Settings to begin. Firecrawl is optional (fallback if this tab can’t be captured).</p>
+        <p style="font-size:11px;color:var(--text-dim)">Add <strong>one</strong> vision API key in Settings (Gemini, Claude, OpenAI, or Mistral — all optional fields; only your chosen provider needs a key). Firecrawl is optional if this tab can’t be captured.</p>
       </div>
     </div>
     <div class="chat-input-area">
@@ -302,9 +302,36 @@
         <p style="font-size:10px;color:var(--text-dim)">Only used when the live tab can’t be captured. <a href="https://firecrawl.dev" target="_blank" style="color:var(--accent);text-decoration:none">firecrawl.dev</a></p>
       </div>
       <div class="setting-group">
-        <label class="setting-label">Google Gemini API Key</label>
-        <input type="password" class="setting-input" id="gemini-key-input" placeholder="AIza..." />
-        <p style="font-size:10px;color:var(--text-dim)">Get your key at <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--accent);text-decoration:none">aistudio.google.com</a></p>
+        <label class="setting-label">Vision model provider</label>
+        <select class="setting-input" id="llm-provider-select" style="cursor:pointer">
+          <option value="gemini">Google Gemini</option>
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="openai">OpenAI (GPT-4o)</option>
+          <option value="mistral">Mistral</option>
+        </select>
+        <p style="font-size:10px;color:var(--text-dim);margin-top:6px;line-height:1.35">
+          <strong>Optional keys:</strong> you only need the key for the provider above — leave the others empty. Saving stores whatever you enter; switch provider anytime.
+        </p>
+      </div>
+      <div class="setting-group">
+        <label class="setting-label">Google Gemini API key (optional)</label>
+        <input type="password" class="setting-input" id="gemini-key-input" placeholder="AIza…" autocomplete="off" />
+        <p style="font-size:10px;color:var(--text-dim)"><a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--accent);text-decoration:none">aistudio.google.com</a></p>
+      </div>
+      <div class="setting-group">
+        <label class="setting-label">Anthropic API key (optional)</label>
+        <input type="password" class="setting-input" id="anthropic-key-input" placeholder="sk-ant-…" autocomplete="off" />
+        <p style="font-size:10px;color:var(--text-dim)"><a href="https://console.anthropic.com/" target="_blank" style="color:var(--accent);text-decoration:none">console.anthropic.com</a></p>
+      </div>
+      <div class="setting-group">
+        <label class="setting-label">OpenAI API key (optional)</label>
+        <input type="password" class="setting-input" id="openai-key-input" placeholder="sk-…" autocomplete="off" />
+        <p style="font-size:10px;color:var(--text-dim)"><a href="https://platform.openai.com/api-keys" target="_blank" style="color:var(--accent);text-decoration:none">platform.openai.com</a></p>
+      </div>
+      <div class="setting-group">
+        <label class="setting-label">Mistral API key (optional)</label>
+        <input type="password" class="setting-input" id="mistral-key-input" placeholder="" autocomplete="off" />
+        <p style="font-size:10px;color:var(--text-dim)"><a href="https://console.mistral.ai/" target="_blank" style="color:var(--accent);text-decoration:none">console.mistral.ai</a></p>
       </div>
       <button class="save-btn" id="save-btn">Save Settings</button>
       <p class="status-text" id="status-text"></p>

@@ -24,8 +24,32 @@ const state = {
   /** Last analyze run tied to guidanceEpoch — blocks duplicate same-epoch calls while allowing a new goal to supersede. */
   activeAnalyzeEpoch: 0,
   firecrawlKey: '',
-  geminiKey: ''
+  geminiKey: '',
+  anthropicKey: '',
+  openaiKey: '',
+  mistralKey: '',
+  /** @type {'gemini'|'anthropic'|'openai'|'mistral'} */
+  llmProvider: 'gemini'
 };
+
+function getApiKeyForProvider(provider) {
+  const p = provider || state.llmProvider || 'gemini';
+  switch (p) {
+    case 'anthropic':
+      return state.anthropicKey || '';
+    case 'openai':
+      return state.openaiKey || '';
+    case 'mistral':
+      return state.mistralKey || '';
+    case 'gemini':
+    default:
+      return state.geminiKey || '';
+  }
+}
+
+function hasActiveLlmKey() {
+  return Boolean(String(getApiKeyForProvider(state.llmProvider) || '').trim());
+}
 
 let navigateDebounce = null;
 /** Tab IDs where we already injected highlight CSS (avoid repeat insertCSS). */
@@ -178,25 +202,47 @@ document.querySelectorAll('.tab').forEach(tab => {
   });
 });
 
+document.getElementById('llm-provider-select')?.addEventListener('change', (e) => {
+  state.llmProvider = e.target.value || 'gemini';
+});
+
 // Settings
 document.getElementById('save-btn').addEventListener('click', () => {
   const fcKey = document.getElementById('firecrawl-key-input').value.trim();
   const gmKey = document.getElementById('gemini-key-input').value.trim();
-  if (!gmKey) {
-    showStatus('Gemini API key is required', false);
-    return;
-  }
-  chrome.storage.local.set({ firecrawl_key: fcKey, gemini_key: gmKey }, () => {
-    state.firecrawlKey = fcKey;
-    state.geminiKey = gmKey;
-    showStatus('Settings saved securely ✓', true);
-  });
+  const antKey = document.getElementById('anthropic-key-input').value.trim();
+  const oaiKey = document.getElementById('openai-key-input').value.trim();
+  const misKey = document.getElementById('mistral-key-input').value.trim();
+  const prov = document.getElementById('llm-provider-select').value || 'gemini';
+  chrome.storage.local.set(
+    {
+      firecrawl_key: fcKey,
+      gemini_key: gmKey,
+      anthropic_key: antKey,
+      openai_key: oaiKey,
+      mistral_key: misKey,
+      llm_provider: prov,
+    },
+    () => {
+      state.firecrawlKey = fcKey;
+      state.geminiKey = gmKey;
+      state.anthropicKey = antKey;
+      state.openaiKey = oaiKey;
+      state.mistralKey = misKey;
+      state.llmProvider = prov;
+      showStatus('Settings saved securely ✓', true);
+    }
+  );
 });
 
 document.getElementById('clear-btn').addEventListener('click', () => {
   chrome.storage.local.clear(() => {
     state.firecrawlKey = '';
     state.geminiKey = '';
+    state.anthropicKey = '';
+    state.openaiKey = '';
+    state.mistralKey = '';
+    state.llmProvider = 'gemini';
     state.messages = [];
     state.journey = [];
     state.lastGoal = '';
@@ -221,6 +267,10 @@ document.getElementById('clear-btn').addEventListener('click', () => {
     chrome.storage.local.remove('guide_session_end_v1');
     document.getElementById('firecrawl-key-input').value = '';
     document.getElementById('gemini-key-input').value = '';
+    document.getElementById('anthropic-key-input').value = '';
+    document.getElementById('openai-key-input').value = '';
+    document.getElementById('mistral-key-input').value = '';
+    document.getElementById('llm-provider-select').value = 'gemini';
     chatMessages.innerHTML = '';
     chatMessages.appendChild(welcomeScreen);
     welcomeScreen.style.display = 'flex';
@@ -232,8 +282,8 @@ document.getElementById('clear-btn').addEventListener('click', () => {
 });
 
 document.getElementById('next-step-btn').addEventListener('click', async () => {
-  if (!state.guidanceGoal || !state.geminiKey) {
-    showStatus('Add your Gemini key and type a goal in chat first', false);
+  if (!state.guidanceGoal || !hasActiveLlmKey()) {
+    showStatus('Add your API key for the selected provider and type a goal in chat first', false);
     return;
   }
   state.pauseAutoAnalysis = false;
@@ -271,8 +321,8 @@ document.getElementById('reset-guidance-btn').addEventListener('click', () => {
 });
 
 document.getElementById('continue-here-btn').addEventListener('click', async () => {
-  if (!state.guidanceGoal || !state.geminiKey) {
-    showStatus('Add your Gemini key and a goal first', false);
+  if (!state.guidanceGoal || !hasActiveLlmKey()) {
+    showStatus('Add your API key for the selected provider and a goal first', false);
     return;
   }
   const tabs = await new Promise((resolve) => {
@@ -452,6 +502,10 @@ async function init() {
   const result = await chrome.storage.local.get([
     'firecrawl_key',
     'gemini_key',
+    'anthropic_key',
+    'openai_key',
+    'mistral_key',
+    'llm_provider',
     'journey_state',
     'chat_history',
     'guide_session_end_v1',
@@ -463,8 +517,17 @@ async function init() {
   }
   state.firecrawlKey = result.firecrawl_key || '';
   state.geminiKey = result.gemini_key || '';
+  state.anthropicKey = result.anthropic_key || '';
+  state.openaiKey = result.openai_key || '';
+  state.mistralKey = result.mistral_key || '';
+  state.llmProvider = result.llm_provider || 'gemini';
   if (result.firecrawl_key) document.getElementById('firecrawl-key-input').value = result.firecrawl_key;
   if (result.gemini_key) document.getElementById('gemini-key-input').value = result.gemini_key;
+  if (result.anthropic_key) document.getElementById('anthropic-key-input').value = result.anthropic_key;
+  if (result.openai_key) document.getElementById('openai-key-input').value = result.openai_key;
+  if (result.mistral_key) document.getElementById('mistral-key-input').value = result.mistral_key;
+  const provSel = document.getElementById('llm-provider-select');
+  if (provSel && state.llmProvider) provSel.value = state.llmProvider;
   if (result.journey_state) {
     state.journey = result.journey_state;
     renderJourney();
@@ -598,7 +661,7 @@ function scheduleGuidanceFollowUp() {
   navigateDebounce = setTimeout(() => {
     navigateDebounce = null;
     if (epoch !== state.guidanceEpoch) return;
-    if (!state.lastGoal || !state.geminiKey) return;
+    if (!state.lastGoal || !hasActiveLlmKey()) return;
     if (state.pauseAutoAnalysis || state.awaitingContextChoice || state.stickyManualPause) return;
     if (state.taskCompletionPaused) return;
     if (state.analyzeInFlight > 0) return;
@@ -625,7 +688,7 @@ function scheduleDomGuidanceFollowUp(fromInteraction) {
   navigateDebounce = setTimeout(() => {
     navigateDebounce = null;
     if (epoch !== state.guidanceEpoch) return;
-    if (!state.lastGoal || !state.geminiKey) return;
+    if (!state.lastGoal || !hasActiveLlmKey()) return;
     if (state.pauseAutoAnalysis || state.awaitingContextChoice || state.stickyManualPause) return;
     if (state.taskCompletionPaused) return;
     if (state.analyzeInFlight > 0) return;
@@ -735,9 +798,12 @@ chatForm.addEventListener('submit', async (e) => {
   if (!text) return;
   chatInput.value = '';
 
-  if (!state.geminiKey) {
+  if (!hasActiveLlmKey()) {
     addMessage('user', text);
-    addMessage('assistant', '⚙️ Add your **Gemini** API key in **Settings**. A Firecrawl key is optional (only if live tab capture fails).');
+    addMessage(
+      'assistant',
+      '⚙️ Open **Settings**, choose a **vision model provider**, and paste **that provider’s API key** (you only need one key — the other fields can stay empty). Firecrawl is optional if live tab capture fails.'
+    );
     return;
   }
 
@@ -887,7 +953,8 @@ async function analyzeCurrentPage(userMessage) {
       url,
       userMessage,
       firecrawlKey: state.firecrawlKey,
-      geminiKey: state.geminiKey,
+      llmProvider: state.llmProvider,
+      apiKey: getApiKeyForProvider(state.llmProvider).trim(),
       pageText,
       pageTitle: pageInfo?.title || activeTab?.title || '',
     };
@@ -963,8 +1030,8 @@ async function analyzeCurrentPage(userMessage) {
           winner.halfLabel === 'lower' ? Math.round(cTop * 100) : Math.round(cBot * 100);
         scanSummaryLine = `📐 **Viewport:** Checked top and bottom. **${winHalf} half** looked best (${Math.round(winner.choiceConf * 100)}% vs ${otherPct}% on the other).${pickNote}`;
 
-        const gt = resTop.timings?.geminiMs;
-        const gb = resBot.timings?.geminiMs;
+        const gt = resTop.timings?.llmMs;
+        const gb = resBot.timings?.llmMs;
         let sumG =
           (typeof gt === 'number' ? gt : 0) + (typeof gb === 'number' ? gb : 0);
 
@@ -981,7 +1048,7 @@ async function analyzeCurrentPage(userMessage) {
           }
           const cFullRaw = Number(resFull.confidence);
           const cFull = Number.isFinite(cFullRaw) ? cFullRaw : 0;
-          const gf = resFull.timings?.geminiMs;
+          const gf = resFull.timings?.llmMs;
           sumG += typeof gf === 'number' ? gf : 0;
           if (cFull > maxSplit + FULL_VIEWPORT_MARGIN) {
             response = { ...resFull };
@@ -991,7 +1058,7 @@ async function analyzeCurrentPage(userMessage) {
           }
         }
 
-        response = { ...response, timings: { ...response.timings, geminiMs: sumG } };
+        response = { ...response, timings: { ...response.timings, llmMs: sumG } };
       }
     }
 
