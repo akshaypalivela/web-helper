@@ -1,5 +1,5 @@
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Download,
   Shield,
@@ -61,6 +61,7 @@ const Index = () => {
   const [hoveredFeature, setHoveredFeature] = useState<number | null>(null);
   const [showGuidePrompt, setShowGuidePrompt] = useState(false);
   const [highlightDownloadCta, setHighlightDownloadCta] = useState(false);
+  const downloadCtaRef = useRef<HTMLDivElement>(null);
   const [showInstallPrompt, setShowInstallPrompt] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
@@ -125,6 +126,14 @@ const Index = () => {
                       setShowInstallPrompt(false);
                       setDownloadError(null);
                       setHighlightDownloadCta(true);
+                      const el = downloadCtaRef.current;
+                      if (!el) return;
+                      const runScroll = () => {
+                        el.scrollIntoView({ behavior: "smooth", block: "center" });
+                      };
+                      requestAnimationFrame(() => {
+                        requestAnimationFrame(runScroll);
+                      });
                     }}
                     className="inline-flex items-center justify-center rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-70 disabled:cursor-not-allowed"
                   >
@@ -194,7 +203,11 @@ const Index = () => {
             <strong className="text-foreground">next click</strong> in your actual UI.
           </p>
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3 w-full max-w-md sm:max-w-none mx-auto">
-            <div className="relative w-full sm:w-auto">
+            <div
+              ref={downloadCtaRef}
+              id="download-cta"
+              className="relative w-full sm:w-auto scroll-mt-24"
+            >
               {highlightDownloadCta && (
                 <div className="absolute -top-12 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-primary/40 bg-card px-3 py-1.5 text-xs font-medium text-primary shadow-lg shadow-primary/20">
                   Step 1: Click this download button
