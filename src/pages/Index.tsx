@@ -19,7 +19,7 @@ const features = [
     icon: MessageSquare,
     title: "Natural language",
     description:
-      "Describe what you want to do next. Gemini Vision reads your viewport and suggests one action at a time.",
+      "Describe what you want to do next. A vision model reads your viewport and suggests one action at a time.",
   },
   {
     icon: Eye,
@@ -35,15 +35,15 @@ const features = [
   },
   {
     icon: Zap,
-    title: "Gemini (+ optional Firecrawl)",
+    title: "Vision models (+ optional Firecrawl)",
     description:
-      "Live tab capture by default. If live capture isn’t available, you can use a Firecrawl key for a scraped page view—see the extension.",
+      "Google Gemini, Anthropic Claude, OpenAI, or Mistral—use your own API key. If live capture isn’t available, you can add a Firecrawl key for a scraped page view—see the extension.",
   },
   {
     icon: KeyRound,
     title: "Your keys, locally",
     description:
-      "API keys stay in the extension. Requests still go to your chosen providers (e.g. Google) when you analyze—no separate backend from this project.",
+      "API keys stay in the extension. Requests go to the provider you pick when you analyze—no separate backend from this project.",
   },
 ];
 
@@ -51,7 +51,10 @@ const steps = [
   { num: "01", text: "Download the zip and unzip the extension folder" },
   { num: "02", text: "Open chrome://extensions and enable Developer mode" },
   { num: "03", text: "Click Load unpacked and select the extension folder" },
-  { num: "04", text: "Add your Gemini API key in Settings (optional: Firecrawl if you use that path)" },
+  {
+    num: "04",
+    text: "In Settings, choose a vision provider and add that provider’s API key (optional: Firecrawl if you use that path)",
+  },
 ];
 
 const Index = () => {
@@ -221,7 +224,10 @@ const Index = () => {
             </a>
           </div>
           <p className="text-xs text-muted-foreground mt-4">
-            Currently supports Gemini. More GPT connections are coming soon.
+            Supports <strong className="text-foreground/90">Google Gemini</strong>,{" "}
+            <strong className="text-foreground/90">Anthropic Claude</strong>,{" "}
+            <strong className="text-foreground/90">OpenAI</strong>, and <strong className="text-foreground/90">Mistral</strong> via your own API
+            keys. More models are coming soon.
           </p>
         </div>
       </section>
@@ -284,7 +290,9 @@ const Index = () => {
               Read the README on GitHub for philosophy, privacy, and limitations.
             </span>
           </p>
-          <p className="text-muted-foreground/90">Powered by Gemini Vision · Optional Firecrawl · Experimental software</p>
+          <p className="text-muted-foreground/90">
+            Vision: Gemini, Claude, OpenAI, or Mistral · Optional Firecrawl · Experimental software
+          </p>
         </div>
       </footer>
     </div>
