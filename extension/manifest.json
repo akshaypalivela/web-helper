@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Integration Guide",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "AI-powered integration guide: vision models (Gemini, Claude, OpenAI, Mistral) on your live tab; optional Firecrawl fallback.",
   "permissions": ["sidePanel", "storage", "activeTab", "scripting", "tabs"],
   "host_permissions": ["<all_urls>", "https://storage.googleapis.com/*"],
