@@ -297,7 +297,7 @@
   <div class="panel" id="panel-settings">
     <div class="settings-content">
       <p style="font-size:11px;color:var(--text-dim);margin:0 0 12px;line-height:1.4">
-        <strong style="color:var(--accent)">v3.1</strong> — Pick a vision provider, then add <strong>only that</strong> provider’s API key (other keys can stay empty). Scroll down for all options.
+        <strong style="color:var(--accent)">v3.2</strong> — Pick a provider, then add <strong>only that</strong> provider’s API key (other keys stay empty). Each answer runs a fast cascade: local shortcut → quick text pass → zoomed vision only when needed, so most questions resolve without a full vision call.
       </p>
       <div class="setting-group">
         <label class="setting-label">Firecrawl API Key (optional)</label>
@@ -356,6 +356,7 @@
     </div>
   </div>
 
+  <script src="decision-engine.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

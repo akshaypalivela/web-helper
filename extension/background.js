@@ -252,13 +252,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true;
   }
+
+  if (message.type === 'ANALYZE_TEXT_TRIAGE') {
+    analyzeTextTriage(message.payload).then(sendResponse).catch((err) => {
+      sendResponse({ success: false, error: err.message });
+    });
+    return true;
+  }
+
+  if (message.type === 'ANALYZE_SOM_VISION') {
+    analyzeSomVision(message.payload).then(sendResponse).catch((err) => {
+      sendResponse({ success: false, error: err.message });
+    });
+    return true;
+  }
 });
 
-/** Stable model tuned for low-latency multimodal UI tasks (vs heavier preview models). */
+/** Main vision models — used only when we fall through to Stage 3 (SoM). */
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const ANTHROPIC_MODEL = 'claude-3-5-sonnet-20241022';
 const OPENAI_MODEL = 'gpt-4o';
 const MISTRAL_MODEL = 'mistral-small-latest';
+
+/** Fast / cheap models used for Stage 2 text-only triage. */
+const GEMINI_FAST_MODEL = 'gemini-2.5-flash-lite';
+const ANTHROPIC_FAST_MODEL = 'claude-3-5-haiku-latest';
+const OPENAI_FAST_MODEL = 'gpt-4o-mini';
+const MISTRAL_FAST_MODEL = 'mistral-small-latest';
+
+function fastModelFor(provider) {
+  switch (String(provider || '').toLowerCase()) {
+    case 'anthropic': return ANTHROPIC_FAST_MODEL;
+    case 'openai': return OPENAI_FAST_MODEL;
+    case 'mistral': return MISTRAL_FAST_MODEL;
+    case 'gemini':
+    default: return GEMINI_FAST_MODEL;
+  }
+}
 
 function inferImageMimeFromInput(screenshot) {
   if (!screenshot || typeof screenshot !== 'string') return 'image/png';
@@ -285,19 +315,11 @@ function extraIntentContextForPrompt(pageUrl, userMessage) {
   return '\n[Context: User wants to connect or manage their Git provider account for deploys. Integrations Marketplace product cards for databases or storage are not the GitHub login path. Prefer Settings, Git, Import project, or a visible Connect GitHub flow.]\n';
 }
 
-function buildViewportHints(usedLiveViewport, viewportImageRegion) {
-  const cropHint =
-    viewportImageRegion === 'top_half' && usedLiveViewport
-      ? ` The screenshot is ONLY the UPPER 50% of the user's viewport (top half). x,y are percentages of THIS CROPPED IMAGE (y=100 is the horizontal midline of the full viewport). Prefer targets in this band. If the correct control is only in the lower half, set confidence below 0.5.`
-      : viewportImageRegion === 'bottom_half' && usedLiveViewport
-        ? ` The screenshot is ONLY the LOWER 50% of the user's viewport. x,y are percentages of THIS CROPPED IMAGE (y=0 is the midline of the full viewport, y=100 is the bottom).`
-        : '';
-
+function buildViewportHints(usedLiveViewport) {
   const coordHint = usedLiveViewport
-    ? `CRITICAL: The image is a pixel-accurate capture of the user's current browser viewport (what they see right now). x and y MUST be the center of the target control as a percentage of THIS image: x = 100 * (centerX / imageWidth), y = 100 * (centerY / imageHeight). Do not guess adjacent nav items — if the user asked for "Explore", the point must be on Explore, not Home. When the chosen next step is genuinely to use site search (user asked to search, or RULES say search is last resort), the target MUST be the search field, search submit, or magnifying-glass control — never a random sidebar link (e.g. "Job center") unless the user explicitly asked for that page.${cropHint}`
+    ? `CRITICAL: The image is a pixel-accurate capture of the user's current browser viewport (what they see right now). x and y MUST be the center of the target control as a percentage of THIS image: x = 100 * (centerX / imageWidth), y = 100 * (centerY / imageHeight). Do not guess adjacent nav items — if the user asked for "Explore", the point must be on Explore, not Home. When the chosen next step is genuinely to use site search (user asked to search, or RULES say search is last resort), the target MUST be the search field, search submit, or magnifying-glass control — never a random sidebar link (e.g. "Job center") unless the user explicitly asked for that page.`
     : `The image may be from a server-side render and can differ from the user's tab (login, scroll, window size). Prefer anchors from the page text below when they disambiguate. x/y are still viewport percentages of this image.`;
-
-  return { cropHint, coordHint };
+  return { coordHint };
 }
 
 function buildGuideSystemInstruction(coordHint) {
@@ -348,9 +370,8 @@ async function buildGuidePromptBundle({
   pageUrl = '',
   usedLiveViewport,
   clickableCandidatesText,
-  viewportImageRegion = 'full',
 }) {
-  const { coordHint } = buildViewportHints(usedLiveViewport, viewportImageRegion);
+  const { coordHint } = buildViewportHints(usedLiveViewport);
   const systemInstruction = buildGuideSystemInstruction(coordHint);
   const candidateBlock =
     usedLiveViewport && clickableCandidatesText && String(clickableCandidatesText).trim()
@@ -615,6 +636,493 @@ async function callVisionLlm(provider, apiKey, bundle) {
   }
 }
 
+/* -----------------------------------------------------------------
+ * Stage 2 — text-only triage
+ * ----------------------------------------------------------------- */
+
+/** Minimal JSON schema for Stage 2 triage — no x/y, coordinates come from the DOM row. */
+const TRIAGE_RESPONSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    candidateIndex: {
+      type: 'NUMBER',
+      description: '0-based index of the row the user should click next, or -1 if nothing fits.',
+    },
+    elementLabel: { type: 'STRING' },
+    confidence: { type: 'NUMBER' },
+    description: { type: 'STRING' },
+    stepSummary: { type: 'STRING' },
+    isMultiStep: { type: 'BOOLEAN' },
+    overallPlan: { type: 'STRING' },
+  },
+  required: ['candidateIndex', 'elementLabel', 'confidence', 'description', 'stepSummary', 'isMultiStep', 'overallPlan'],
+};
+
+function buildTriageSystemInstruction() {
+  return `You are a UI Guide working from a compact list of clickable controls — no screenshot this round.
+Each candidate is one line: "idx|role|label|x|y" (x,y are percentages of the viewport).
+
+RULES:
+- Pick the single row the user should click NEXT toward their goal.
+- candidateIndex MUST be one of the listed idx values. Use -1 only if no row fits.
+- elementLabel MUST match that row's label verbatim (accents included).
+- Multilingual UIs: map intent semantically (Careers↔Karriere/Empleo, Settings↔Einstellungen, etc.).
+- SITE SEARCH IS LAST RESORT. Do NOT choose a header search field, search icon, or Cmd/Ctrl-K unless the user explicitly asked to search OR no browse/nav path in the candidates leads toward the goal. If you fall back to search, say so in description and keep confidence below 0.55.
+- When the screen does not contain a direct next step (e.g. wrong page after several attempts), prefer Back, breadcrumbs, Settings, Account, Help, or a clearly relevant nav link — mention briefly in description.
+- For multi-screen goals, set isMultiStep true and give a short overallPlan (2–4 sentences). Still return ONE action for now. stepSummary is a past-tense line suitable for step history.
+- Lower confidence when the visible candidates do not clearly match the goal. Confidence below 0.66 tells downstream code to escalate to a vision pass.
+- Return ONLY a valid JSON object matching the schema. No markdown fences, no text outside JSON.`;
+}
+
+function buildDoneStepsBlock(doneSteps) {
+  const arr = Array.isArray(doneSteps) ? doneSteps.filter(Boolean).slice(-6) : [];
+  if (!arr.length) return '';
+  return `\n\nSteps already completed (most recent last):\n- ${arr.join('\n- ')}`;
+}
+
+function buildTextTriageBundle({
+  userMessage,
+  pageTitle,
+  pageUrl = '',
+  candidatesText,
+  doneSteps,
+}) {
+  const systemInstruction = buildTriageSystemInstruction();
+  const urlLine = pageUrl ? `Page URL: ${pageUrl}\n\n` : '';
+  const intentHint = extraIntentContextForPrompt(pageUrl, userMessage);
+  const stepsBlock = buildDoneStepsBlock(doneSteps);
+  const candBlock = String(candidatesText || '').slice(0, 1800) || '(no candidates collected)';
+  const userText = `${urlLine}${intentHint}User intent: "${userMessage}"\n\nPage title: "${pageTitle || ''}"${stepsBlock}\n\nCandidates (idx|role|label|x|y):\n${candBlock}`;
+  return { systemInstruction, userText };
+}
+
+function shapeTriageResponse(result, rawText) {
+  if (!result || typeof result !== 'object') {
+    return {
+      candidateIndex: -1,
+      elementLabel: '',
+      confidence: 0,
+      description: stripJsonArtifacts(String(rawText || '').slice(0, 400)) || 'No clear target.',
+      stepSummary: '',
+      isMultiStep: false,
+      overallPlan: '',
+      usedFallback: true,
+    };
+  }
+  let ci = Number(result.candidateIndex);
+  if (!Number.isFinite(ci)) ci = -1;
+  ci = Math.max(-1, Math.round(ci));
+  let conf = Number(result.confidence);
+  if (!Number.isFinite(conf)) conf = 0.4;
+  conf = Math.max(0, Math.min(1, conf));
+  const description = stripJsonArtifacts(String(result.description || '').trim()) || 'Click this element.';
+  return {
+    candidateIndex: ci,
+    elementLabel: String(result.elementLabel || '').trim(),
+    confidence: conf,
+    description,
+    stepSummary: stripJsonArtifacts(String(result.stepSummary || '').trim()),
+    isMultiStep: Boolean(result.isMultiStep),
+    overallPlan: stripJsonArtifacts(String(result.overallPlan || '').trim()),
+    usedFallback: Boolean(result.usedFallback),
+  };
+}
+
+async function callGeminiTextTriage(apiKey, bundle) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_FAST_MODEL}:generateContent?key=${apiKey}`;
+  const makeBody = (useSchema) => ({
+    contents: [{ parts: [{ text: bundle.userText }] }],
+    systemInstruction: { parts: [{ text: bundle.systemInstruction }] },
+    generationConfig: {
+      temperature: 0.15,
+      maxOutputTokens: 512,
+      responseMimeType: 'application/json',
+      ...(useSchema ? { responseSchema: TRIAGE_RESPONSE_SCHEMA } : {}),
+    },
+  });
+
+  let res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(makeBody(true)),
+  });
+  let data = await res.json();
+  if (!res.ok) {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(makeBody(false)),
+    });
+    data = await res.json();
+  }
+  if (!res.ok) {
+    throw new Error(data.error?.message || `Gemini triage error [${res.status}]`);
+  }
+  const rawText = getGeminiResponseText(data);
+  const result = tryExtractGuideJson(rawText);
+  return shapeTriageResponse(result, rawText);
+}
+
+async function callAnthropicTextTriage(apiKey, bundle) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: ANTHROPIC_FAST_MODEL,
+      max_tokens: 600,
+      temperature: 0.15,
+      system: bundle.systemInstruction,
+      messages: [{ role: 'user', content: [{ type: 'text', text: bundle.userText }] }],
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error?.message || `Anthropic triage error [${res.status}]`);
+  }
+  const rawText = (data.content || [])
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('')
+    .trim();
+  const result = tryExtractGuideJson(rawText);
+  return shapeTriageResponse(result, rawText);
+}
+
+async function callOpenAICompatibleTextTriage(apiKey, bundle, baseUrl, model, extraBody = {}) {
+  const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.15,
+      max_tokens: 600,
+      messages: [
+        { role: 'system', content: bundle.systemInstruction },
+        { role: 'user', content: bundle.userText },
+      ],
+      ...extraBody,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error?.message || data.message || `Triage error [${res.status}]`);
+  }
+  const rawText = data.choices?.[0]?.message?.content || '';
+  const result = tryExtractGuideJson(rawText);
+  return shapeTriageResponse(result, rawText);
+}
+
+async function callOpenAITextTriage(apiKey, bundle) {
+  return callOpenAICompatibleTextTriage(apiKey, bundle, 'https://api.openai.com', OPENAI_FAST_MODEL, {
+    response_format: { type: 'json_object' },
+  });
+}
+
+async function callMistralTextTriage(apiKey, bundle) {
+  try {
+    return await callOpenAICompatibleTextTriage(apiKey, bundle, 'https://api.mistral.ai', MISTRAL_FAST_MODEL, {
+      response_format: { type: 'json_object' },
+    });
+  } catch {
+    return callOpenAICompatibleTextTriage(apiKey, bundle, 'https://api.mistral.ai', MISTRAL_FAST_MODEL, {});
+  }
+}
+
+async function callTextOnlyTriage(provider, apiKey, bundle) {
+  const p = String(provider || 'gemini').toLowerCase();
+  switch (p) {
+    case 'anthropic': return callAnthropicTextTriage(apiKey, bundle);
+    case 'openai': return callOpenAITextTriage(apiKey, bundle);
+    case 'mistral': return callMistralTextTriage(apiKey, bundle);
+    case 'gemini':
+    default: return callGeminiTextTriage(apiKey, bundle);
+  }
+}
+
+async function analyzeTextTriage({
+  userMessage,
+  pageTitle,
+  pageUrl = '',
+  candidatesText,
+  doneSteps,
+  llmProvider = 'gemini',
+  apiKey,
+}) {
+  const key = apiKey && String(apiKey).trim();
+  if (!key) {
+    throw new Error('No API key for the selected model.');
+  }
+  const bundle = buildTextTriageBundle({ userMessage, pageTitle, pageUrl, candidatesText, doneSteps });
+  const tLlm = Date.now();
+  const triage = await callTextOnlyTriage(llmProvider, key, bundle);
+  const llmMs = Date.now() - tLlm;
+  return {
+    success: true,
+    ...triage,
+    timings: {
+      stage: 'text_llm',
+      llmMs,
+      llmProvider: String(llmProvider || 'gemini').toLowerCase(),
+      model: fastModelFor(llmProvider),
+    },
+  };
+}
+
+/* -----------------------------------------------------------------
+ * Stage 3 — SoM vision (pre-cropped image, numbered overlay boxes)
+ * ----------------------------------------------------------------- */
+
+/** SoM response schema — same shape as the main guide + an explicit chosenNumber. */
+const SOM_RESPONSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    chosenNumber: {
+      type: 'NUMBER',
+      description: 'The integer number drawn on the box the user should click, or -1 if none fits.',
+    },
+    elementLabel: { type: 'STRING' },
+    confidence: { type: 'NUMBER' },
+    description: { type: 'STRING' },
+    stepSummary: { type: 'STRING' },
+    isMultiStep: { type: 'BOOLEAN' },
+    overallPlan: { type: 'STRING' },
+  },
+  required: ['chosenNumber', 'elementLabel', 'confidence', 'description', 'stepSummary', 'isMultiStep', 'overallPlan'],
+};
+
+function buildSomSystemInstruction() {
+  return `You are a UI Guide. The user's viewport has been cropped to the region most likely to contain the target, and numbered boxes have been drawn over candidate clickable elements. Each candidate also appears as one row: "number|role|label".
+
+RULES:
+- Return the integer number printed on the box the user should click NEXT, in chosenNumber. If no box fits, set chosenNumber to -1.
+- elementLabel MUST match the label of the box whose number you chose (verbatim, accents included).
+- Coordinates are NOT required — the extension resolves them from the chosen number.
+- Prefer browse/nav/settings over site search. Use search only if the user explicitly asked OR no browse/nav path leads toward the goal; if you do, say so in description and keep confidence below 0.6.
+- Multi-screen goals: set isMultiStep true and fill overallPlan with a 2–4 sentence outline; still pick ONE action for now. stepSummary is one past-tense line for step history.
+- If no numbered box matches the goal, set chosenNumber -1, confidence 0, and use description to explain what to do next (scroll, go Back, open a menu, try Settings, etc.).
+- Return ONLY a valid JSON object matching the schema. No markdown fences, no text outside JSON.`;
+}
+
+function buildSomVisionBundle({
+  screenshot,
+  userMessage,
+  pageTitle,
+  pageUrl = '',
+  somList,
+  doneSteps,
+}) {
+  const systemInstruction = buildSomSystemInstruction();
+  const urlLine = pageUrl ? `Page URL: ${pageUrl}\n\n` : '';
+  const intentHint = extraIntentContextForPrompt(pageUrl, userMessage);
+  const stepsBlock = buildDoneStepsBlock(doneSteps);
+  const somBlock = String(somList || '').slice(0, 1400) || '(no candidates)';
+  const userText = `${urlLine}${intentHint}User intent: "${userMessage}"\n\nPage title: "${pageTitle || ''}"${stepsBlock}\n\nNumbered candidates (number|role|label):\n${somBlock}`;
+
+  const imageMime = inferImageMimeFromInput(screenshot);
+  let base64Data;
+  if (typeof screenshot === 'string' && screenshot.startsWith('data:')) {
+    base64Data = screenshot.split(',')[1];
+  } else if (typeof screenshot === 'string' && /^https?:/.test(screenshot)) {
+    // Remote URL — caller should normally crop locally, but support it anyway.
+    base64Data = null;
+  } else {
+    base64Data = screenshot;
+  }
+  return { systemInstruction, userText, base64Data, imageMime };
+}
+
+function shapeSomResponse(result, rawText) {
+  const base = shapeGuideResponse(result, rawText);
+  const ch = Number(result?.chosenNumber);
+  const idx = Number.isFinite(ch) ? Math.max(-1, Math.round(ch)) : -1;
+  return { ...base, candidateIndex: idx };
+}
+
+async function callGeminiSom(apiKey, bundle) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const parts = [
+    { text: bundle.userText },
+    { inlineData: { mimeType: bundle.imageMime, data: bundle.base64Data } },
+  ];
+  const makeBody = (useSchema) => ({
+    contents: [{ parts }],
+    systemInstruction: { parts: [{ text: bundle.systemInstruction }] },
+    generationConfig: {
+      temperature: 0.15,
+      maxOutputTokens: 900,
+      responseMimeType: 'application/json',
+      ...(useSchema ? { responseSchema: SOM_RESPONSE_SCHEMA } : {}),
+    },
+  });
+  let res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(makeBody(true)),
+  });
+  let data = await res.json();
+  if (!res.ok) {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(makeBody(false)),
+    });
+    data = await res.json();
+  }
+  if (!res.ok) {
+    throw new Error(data.error?.message || `Gemini SoM error [${res.status}]`);
+  }
+  const rawText = getGeminiResponseText(data);
+  const parsed = tryExtractGuideJson(rawText);
+  return shapeSomResponse(parsed, rawText);
+}
+
+async function callAnthropicSom(apiKey, bundle) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: ANTHROPIC_MODEL,
+      max_tokens: 900,
+      temperature: 0.15,
+      system: bundle.systemInstruction,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: bundle.imageMime, data: bundle.base64Data },
+            },
+            { type: 'text', text: bundle.userText },
+          ],
+        },
+      ],
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error?.message || `Anthropic SoM error [${res.status}]`);
+  }
+  const rawText = (data.content || [])
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('')
+    .trim();
+  const parsed = tryExtractGuideJson(rawText);
+  return shapeSomResponse(parsed, rawText);
+}
+
+async function callOpenAICompatibleSom(apiKey, bundle, baseUrl, model, extraBody = {}) {
+  const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.15,
+      max_tokens: 900,
+      messages: [
+        { role: 'system', content: bundle.systemInstruction },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: bundle.userText },
+            {
+              type: 'image_url',
+              image_url: { url: `data:${bundle.imageMime};base64,${bundle.base64Data}` },
+            },
+          ],
+        },
+      ],
+      ...extraBody,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error?.message || data.message || `SoM error [${res.status}]`);
+  }
+  const rawText = data.choices?.[0]?.message?.content || '';
+  const parsed = tryExtractGuideJson(rawText);
+  return shapeSomResponse(parsed, rawText);
+}
+
+async function callOpenAISom(apiKey, bundle) {
+  return callOpenAICompatibleSom(apiKey, bundle, 'https://api.openai.com', OPENAI_MODEL, {
+    response_format: { type: 'json_object' },
+  });
+}
+
+async function callMistralSom(apiKey, bundle) {
+  try {
+    return await callOpenAICompatibleSom(apiKey, bundle, 'https://api.mistral.ai', MISTRAL_MODEL, {
+      response_format: { type: 'json_object' },
+    });
+  } catch {
+    return callOpenAICompatibleSom(apiKey, bundle, 'https://api.mistral.ai', MISTRAL_MODEL, {});
+  }
+}
+
+async function callSomVisionLlm(provider, apiKey, bundle) {
+  const p = String(provider || 'gemini').toLowerCase();
+  switch (p) {
+    case 'anthropic': return callAnthropicSom(apiKey, bundle);
+    case 'openai': return callOpenAISom(apiKey, bundle);
+    case 'mistral': return callMistralSom(apiKey, bundle);
+    case 'gemini':
+    default: return callGeminiSom(apiKey, bundle);
+  }
+}
+
+async function analyzeSomVision({
+  screenshot,
+  userMessage,
+  pageTitle,
+  pageUrl = '',
+  somList,
+  doneSteps,
+  llmProvider = 'gemini',
+  apiKey,
+}) {
+  const key = apiKey && String(apiKey).trim();
+  if (!key) throw new Error('No API key for the selected model.');
+  if (!screenshot || typeof screenshot !== 'string') {
+    throw new Error('SoM stage requires a pre-cropped screenshot.');
+  }
+  const bundle = buildSomVisionBundle({ screenshot, userMessage, pageTitle, pageUrl, somList, doneSteps });
+  const tLlm = Date.now();
+  const out = await callSomVisionLlm(llmProvider, key, bundle);
+  const llmMs = Date.now() - tLlm;
+  return {
+    success: true,
+    ...out,
+    timings: {
+      stage: 'som_vision',
+      llmMs,
+      llmProvider: String(llmProvider || 'gemini').toLowerCase(),
+      model: (function () {
+        const p = String(llmProvider || 'gemini').toLowerCase();
+        if (p === 'anthropic') return ANTHROPIC_MODEL;
+        if (p === 'openai') return OPENAI_MODEL;
+        if (p === 'mistral') return MISTRAL_MODEL;
+        return GEMINI_MODEL;
+      })(),
+    },
+  };
+}
+
 async function analyzePage({
   url,
   userMessage,
@@ -626,7 +1134,6 @@ async function analyzePage({
   pageText,
   pageTitle: clientTitle,
   clickableCandidatesText,
-  viewportImageRegion = 'full',
 }) {
   const key =
     (apiKey && String(apiKey).trim()) ||
@@ -692,9 +1199,7 @@ async function analyzePage({
     pageTitle,
     pageUrl: url || '',
     usedLiveViewport,
-    clickableCandidatesText:
-      usedLiveViewport && viewportImageRegion === 'full' ? clickableCandidatesText : '',
-    viewportImageRegion,
+    clickableCandidatesText: usedLiveViewport ? clickableCandidatesText : '',
   });
 
   const tLlm = Date.now();

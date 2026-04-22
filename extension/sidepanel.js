@@ -29,7 +29,11 @@ const state = {
   openaiKey: '',
   mistralKey: '',
   /** @type {'gemini'|'anthropic'|'openai'|'mistral'} */
-  llmProvider: 'gemini'
+  llmProvider: 'gemini',
+  /** Tracks when each cacheKey was last served from Stage 1 — used to bust stale cache hits on retry. */
+  lastCachePick: Object.create(null),
+  /** Cache keys the user has explicitly asked to skip (set on Next step). */
+  cacheBustedKeys: new Set(),
 };
 
 function getApiKeyForProvider(provider) {
@@ -117,35 +121,40 @@ function downscaleDataUrlForGemini(dataUrl, maxWidth = 1536, quality = 0.88) {
   });
 }
 
-/** Vertical slice of a data URL image; yStartFrac/yEndFrac in [0,1] relative to full height. */
-function cropDataUrlVerticalSlice(dataUrl, yStartFrac, yEndFrac) {
+/** Crop a data URL image by a rectangle expressed in percentages (0–100) of the source image. */
+function cropDataUrlByRect(dataUrl, rectPct) {
   if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image')) {
     return Promise.resolve(dataUrl);
   }
-  const ys = Math.max(0, Math.min(1, yStartFrac));
-  const ye = Math.max(ys, Math.min(1, yEndFrac));
+  const x = Math.max(0, Math.min(100, Number(rectPct?.x) || 0));
+  const y = Math.max(0, Math.min(100, Number(rectPct?.y) || 0));
+  const w = Math.max(1, Math.min(100 - x, Number(rectPct?.w) || (100 - x)));
+  const h = Math.max(1, Math.min(100 - y, Number(rectPct?.h) || (100 - y)));
+
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
       try {
-        const w = img.naturalWidth;
-        const h = img.naturalHeight;
-        if (!w || !h) {
+        const W = img.naturalWidth;
+        const H = img.naturalHeight;
+        if (!W || !H) {
           resolve(dataUrl);
           return;
         }
-        const sy = Math.round(ys * h);
-        const sh = Math.max(1, Math.round(ye * h) - sy);
+        const sx = Math.round((x / 100) * W);
+        const sy = Math.round((y / 100) * H);
+        const sw = Math.max(1, Math.round((w / 100) * W));
+        const sh = Math.max(1, Math.round((h / 100) * H));
         const c = document.createElement('canvas');
-        c.width = w;
+        c.width = sw;
         c.height = sh;
         const ctx = c.getContext('2d');
         if (!ctx) {
           resolve(dataUrl);
           return;
         }
-        ctx.drawImage(img, 0, sy, w, sh, 0, 0, w, sh);
-        resolve(c.toDataURL('image/jpeg', 0.88));
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+        resolve(c.toDataURL('image/jpeg', 0.82));
       } catch {
         resolve(dataUrl);
       }
@@ -155,34 +164,356 @@ function cropDataUrlVerticalSlice(dataUrl, yStartFrac, yEndFrac) {
   });
 }
 
+/**
+ * Draw numbered Set-of-Mark boxes on top of a cropped screenshot.
+ *   croppedDataUrl — the cropped image.
+ *   cropRect       — { x, y, w, h } viewport percentages the crop covers.
+ *   boxes          — [{ number, xPct, yPct, wPct, hPct }] in VIEWPORT percentages.
+ * Returns a JPEG data URL with the overlay baked in.
+ */
+function drawSomOverlay(croppedDataUrl, cropRect, boxes) {
+  if (!croppedDataUrl || typeof croppedDataUrl !== 'string' || !croppedDataUrl.startsWith('data:image')) {
+    return Promise.resolve(croppedDataUrl);
+  }
+  const cx = Math.max(0, Math.min(100, Number(cropRect?.x) || 0));
+  const cy = Math.max(0, Math.min(100, Number(cropRect?.y) || 0));
+  const cw = Math.max(1, Math.min(100, Number(cropRect?.w) || 100));
+  const ch = Math.max(1, Math.min(100, Number(cropRect?.h) || 100));
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const W = img.naturalWidth;
+        const H = img.naturalHeight;
+        if (!W || !H) {
+          resolve(croppedDataUrl);
+          return;
+        }
+        const c = document.createElement('canvas');
+        c.width = W;
+        c.height = H;
+        const ctx = c.getContext('2d');
+        if (!ctx) {
+          resolve(croppedDataUrl);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, W, H);
+
+        for (const b of Array.isArray(boxes) ? boxes : []) {
+          const boxX = (((Number(b.xPct) || 0) - cx) / cw) * W;
+          const boxY = (((Number(b.yPct) || 0) - cy) / ch) * H;
+          const boxW = ((Number(b.wPct) || 0) / cw) * W;
+          const boxH = ((Number(b.hPct) || 0) / ch) * H;
+          if (boxW < 2 || boxH < 2) continue;
+
+          ctx.lineWidth = Math.max(2, Math.round(W / 360));
+          ctx.strokeStyle = 'rgba(255, 88, 0, 0.95)';
+          ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+          const num = String(b.number ?? '?');
+          const fontSize = Math.max(14, Math.round(Math.min(boxW, boxH) * 0.55));
+          ctx.font = `bold ${fontSize}px system-ui, -apple-system, Segoe UI, sans-serif`;
+          const tm = ctx.measureText(num);
+          const pad = Math.max(3, fontSize * 0.25);
+          const labelW = tm.width + pad * 2;
+          const labelH = fontSize + pad * 1.2;
+          const lx = Math.max(0, boxX);
+          const ly = Math.max(0, boxY);
+          ctx.fillStyle = 'rgba(255, 88, 0, 0.95)';
+          ctx.fillRect(lx, ly, labelW, labelH);
+          ctx.fillStyle = '#ffffff';
+          ctx.textBaseline = 'top';
+          ctx.fillText(num, lx + pad, ly + pad * 0.4);
+        }
+
+        resolve(c.toDataURL('image/jpeg', 0.82));
+      } catch {
+        resolve(croppedDataUrl);
+      }
+    };
+    img.onerror = () => resolve(croppedDataUrl);
+    img.src = croppedDataUrl;
+  });
+}
+
 function setAnalyzeStatus(typingRowEl, text) {
   const el = typingRowEl?.querySelector?.('.analyze-status');
   if (el) el.textContent = text;
 }
 
-/** Map model y (0–100 within crop) to full viewport y; cropped passes must not use candidateIndex. */
-function mapPhaseResponseToViewport(res, half) {
-  if (!res || typeof res !== 'object') return res;
-  const out = { ...res, candidateIndex: -1 };
-  let y = Number(out.y);
-  if (!Number.isFinite(y)) y = 22;
-  y = Math.max(0, Math.min(100, y));
-  if (half === 'top') out.y = y * 0.5;
-  else if (half === 'bottom') out.y = 50 + y * 0.5;
-  return out;
-}
-
 function getClickableCandidatesFromTab(tabId) {
   return new Promise((resolve) => {
     if (!tabId) {
-      resolve({ text: '' });
+      resolve({ text: '', rows: [], domSig: '' });
       return;
     }
     chrome.tabs.sendMessage(tabId, { type: 'GET_CLICKABLE_CANDIDATES' }, (res) => {
-      if (chrome.runtime.lastError) resolve({ text: '' });
-      else resolve(res || { text: '' });
+      if (chrome.runtime.lastError) resolve({ text: '', rows: [], domSig: '' });
+      else resolve(res || { text: '', rows: [], domSig: '' });
     });
   });
+}
+
+function computeCropHullFromTab(tabId, indices) {
+  return new Promise((resolve) => {
+    if (!tabId) {
+      resolve({ x: 0, y: 0, w: 100, h: 100, fullViewport: true });
+      return;
+    }
+    chrome.tabs.sendMessage(tabId, { type: 'COMPUTE_CROP_HULL', indices }, (res) => {
+      if (chrome.runtime.lastError) resolve({ x: 0, y: 0, w: 100, h: 100, fullViewport: true });
+      else resolve(res || { x: 0, y: 0, w: 100, h: 100, fullViewport: true });
+    });
+  });
+}
+
+function captureVisibleTabDataUrl(windowId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.captureVisibleTab(windowId, { format: 'png' }, (du) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve(du);
+    });
+  });
+}
+
+const IG_CACHE_KEY = 'ig_cache_v1';
+const IG_CACHE_MAX_ENTRIES = 200;
+
+function loadIgCache() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(IG_CACHE_KEY, (obj) => {
+      resolve(obj?.[IG_CACHE_KEY] || {});
+    });
+  });
+}
+
+function writeIgCache(cacheKey, entry) {
+  return new Promise((resolve) => {
+    loadIgCache().then((map) => {
+      const next = { ...map, [cacheKey]: entry };
+      const keys = Object.keys(next);
+      if (keys.length > IG_CACHE_MAX_ENTRIES) {
+        keys
+          .map((k) => ({ k, ts: Number(next[k]?.ts) || 0 }))
+          .sort((a, b) => a.ts - b.ts)
+          .slice(0, keys.length - IG_CACHE_MAX_ENTRIES)
+          .forEach(({ k }) => {
+            delete next[k];
+          });
+      }
+      chrome.storage.local.set({ [IG_CACHE_KEY]: next }, () => resolve());
+    });
+  });
+}
+
+function deleteIgCache(cacheKey) {
+  return new Promise((resolve) => {
+    loadIgCache().then((map) => {
+      if (!map || !(cacheKey in map)) {
+        resolve();
+        return;
+      }
+      const next = { ...map };
+      delete next[cacheKey];
+      chrome.storage.local.set({ [IG_CACHE_KEY]: next }, () => resolve());
+    });
+  });
+}
+
+/** Called on Next step / reset so the next analyze skips a recently-served cache entry. */
+function markCurrentGoalCacheBusted(_reason) {
+  const engine = typeof window !== 'undefined' ? window.IG_DECISION : null;
+  if (!engine) return;
+  const goal = state.guidanceGoal || state.lastGoal || '';
+  const domain = state.guidanceDomain || '';
+  if (!goal || !domain) return;
+  const key = engine.makeCacheKey(domain, goal);
+  state.cacheBustedKeys.add(key);
+  deleteIgCache(key).catch(() => {});
+}
+
+function providerDisplayName(p) {
+  switch (String(p || '').toLowerCase()) {
+    case 'anthropic': return 'Claude';
+    case 'openai': return 'GPT-4o';
+    case 'mistral': return 'Mistral';
+    case 'gemini':
+    default: return 'Gemini';
+  }
+}
+
+/** Tokenize a string into lowercased alphanumeric words ≥ 3 chars. */
+function tokenizeForMatch(text) {
+  const s = String(text || '').toLowerCase();
+  if (!s) return [];
+  const raw = s.match(/[a-z0-9]+/g) || [];
+  return raw.filter((t) => t.length >= 3);
+}
+
+const GOAL_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'this', 'that', 'please', 'help', 'want',
+  'need', 'how', 'get', 'can', 'you', 'your', 'about', 'from', 'into', 'onto',
+  'add', 'set', 'let', 'use', 'tab', 'button', 'link', 'click', 'open', 'goto',
+  'next', 'step', 'page', 'here', 'show', 'make', 'take', 'give', 'put',
+]);
+
+/** Does row.label share at least one meaningful token with the user's goal? */
+function rowAlignsWithGoal(rowLabel, goal) {
+  const rowTokens = new Set(tokenizeForMatch(rowLabel));
+  if (!rowTokens.size) return false;
+  const goalTokens = tokenizeForMatch(goal).filter((t) => !GOAL_STOPWORDS.has(t));
+  if (!goalTokens.length) return true;
+  for (const t of goalTokens) {
+    if (rowTokens.has(t)) return true;
+    for (const rt of rowTokens) {
+      if (rt.length >= 4 && (rt.startsWith(t) || t.startsWith(rt))) return true;
+    }
+  }
+  return false;
+}
+
+/** Does a free-form text (model label or description) reference the row's label? */
+function rowLabelMatchesText(rowLabel, text) {
+  const rowTokens = tokenizeForMatch(rowLabel);
+  if (!rowTokens.length) return false;
+  const textTokens = new Set(tokenizeForMatch(text));
+  if (!textTokens.size) return false;
+  let hits = 0;
+  for (const t of rowTokens) if (textTokens.has(t)) hits += 1;
+  if (rowTokens.length === 1) return hits >= 1;
+  return hits >= Math.min(2, Math.ceil(rowTokens.length / 2));
+}
+
+/** Build a guide-response shape from a DOM candidate row for cache / heuristic / triage / SoM hits. */
+function buildResponseFromCandidate(row, overrides = {}) {
+  const elementLabel = overrides.elementLabel || row?.label || 'Element';
+  const description = overrides.description || `Click **${elementLabel}**.`;
+  return {
+    success: true,
+    x: Number.isFinite(overrides.x) ? overrides.x : row?.xPct ?? 50,
+    y: Number.isFinite(overrides.y) ? overrides.y : row?.yPct ?? 44,
+    description,
+    confidence:
+      Number.isFinite(Number(overrides.confidence))
+        ? Math.max(0, Math.min(1, Number(overrides.confidence)))
+        : 0.95,
+    elementLabel,
+    isMultiStep: Boolean(overrides.isMultiStep),
+    overallPlan: overrides.overallPlan || '',
+    stepSummary: overrides.stepSummary || `Clicked ${elementLabel}`,
+    candidateIndex: Number.isFinite(row?.idx) ? row.idx : -1,
+    usedFallback: false,
+    pageTitle: overrides.pageTitle || '',
+    usedRemoteScrape: false,
+    timings: overrides.llmTimings || { stage: overrides.source || 'local', llmMs: 0 },
+    _source: overrides.source || 'local',
+  };
+}
+
+function requestTextTriage(payload) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: 'ANALYZE_TEXT_TRIAGE', payload }, (res) => {
+      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+      if (!res) return reject(new Error('No response from background'));
+      if (res.error && !res.success) return reject(new Error(res.error));
+      resolve(res);
+    });
+  });
+}
+
+function requestSomVision(payload) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: 'ANALYZE_SOM_VISION', payload }, (res) => {
+      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+      if (!res) return reject(new Error('No response from background'));
+      if (res.error && !res.success) return reject(new Error(res.error));
+      resolve(res);
+    });
+  });
+}
+
+function requestServerAnalyze(payload) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: 'ANALYZE_PAGE', payload }, (res) => {
+      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+      if (!res) return reject(new Error('No response from background'));
+      if (res.error && !res.success) return reject(new Error(res.error));
+      resolve(res);
+    });
+  });
+}
+
+/**
+ * Pick up to K candidate indices for the SoM overlay:
+ *   1) Stage-2 pick if any
+ *   2) Any rows whose label matches intent shortcut aliases
+ *   3) Fill up with the first N in reading order
+ */
+function computeSomTopKIndices(rows, userMessage, triage, k = 10) {
+  const picks = [];
+  const seen = new Set();
+  const push = (idx) => {
+    if (!Number.isFinite(idx) || idx < 0) return;
+    if (seen.has(idx)) return;
+    seen.add(idx);
+    picks.push(idx);
+  };
+  if (triage && Number.isFinite(Number(triage.candidateIndex))) {
+    push(Number(triage.candidateIndex));
+  }
+  const engine = typeof window !== 'undefined' ? window.IG_DECISION : null;
+  const shortcut = engine ? engine.findShortcutIntent(userMessage) : null;
+  if (shortcut) {
+    const scored = rows
+      .map((r) => ({
+        r,
+        score: (function () {
+          const n = engine.normalizeLabel(r.label);
+          if (!n) return 0;
+          let best = 0;
+          for (const alias of shortcut.labels) {
+            const an = engine.normalizeLabel(alias);
+            if (!an) continue;
+            if (n === an) best = Math.max(best, 100);
+            else if (n.includes(an) && an.length >= 3) best = Math.max(best, 88);
+            else if (an.includes(n) && n.length >= 3) best = Math.max(best, 70);
+          }
+          return best;
+        })(),
+      }))
+      .filter((x) => x.score >= 60)
+      .sort((a, b) => b.score - a.score);
+    for (const s of scored) push(s.r.idx);
+  }
+  for (const r of rows) {
+    if (picks.length >= k) break;
+    push(r.idx);
+  }
+  return picks.slice(0, k);
+}
+
+/** Triage-acceptance gate: confidence, valid candidate index, reasonable label agreement. */
+function validateTriageAcceptance(triage, rows) {
+  if (!triage || !Array.isArray(rows) || !rows.length) return { accepted: false };
+  const conf = Number(triage.confidence);
+  if (!Number.isFinite(conf) || conf < 0.66) return { accepted: false, reason: 'low_conf' };
+  const ci = Number(triage.candidateIndex);
+  if (!Number.isFinite(ci) || ci < 0) return { accepted: false, reason: 'no_index' };
+  const idx = rows.findIndex((r) => Number(r.idx) === Math.round(ci));
+  if (idx < 0) return { accepted: false, reason: 'index_out_of_range' };
+  const row = rows[idx];
+  const engine = typeof window !== 'undefined' ? window.IG_DECISION : null;
+  if (engine && triage.elementLabel) {
+    const a = engine.normalizeLabel(row.label);
+    const b = engine.normalizeLabel(triage.elementLabel);
+    if (a && b && a !== b && !a.includes(b) && !b.includes(a)) {
+      const words = b.split(' ').filter((w) => w.length > 2);
+      const allIn = words.length && words.every((w) => a.includes(w));
+      if (!allIn) return { accepted: false, reason: 'label_mismatch' };
+    }
+  }
+  return { accepted: true, idx };
 }
 
 // DOM
@@ -261,6 +592,8 @@ document.getElementById('clear-btn').addEventListener('click', () => {
     state.pauseAutoAnalysis = false;
     state.awaitingContextChoice = false;
     state.stickyManualPause = false;
+    state.lastCachePick = Object.create(null);
+    state.cacheBustedKeys = new Set();
     cancelPendingNavigation();
     syncGuidanceEpochToStorage();
     hideContextStrip();
@@ -290,6 +623,7 @@ document.getElementById('next-step-btn').addEventListener('click', async () => {
   state.awaitingContextChoice = false;
   state.stickyManualPause = false;
   state.taskCompletionPaused = false;
+  markCurrentGoalCacheBusted('next_step');
   hideContextStrip();
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (tabs[0]?.id) state.guidanceTabId = tabs[0].id;
@@ -306,6 +640,8 @@ document.getElementById('reset-guidance-btn').addEventListener('click', () => {
   state.guidanceTabId = null;
   state.guidanceDomain = '';
   state.guidanceEpoch += 1;
+  state.lastCachePick = Object.create(null);
+  state.cacheBustedKeys = new Set();
   cancelPendingNavigation();
   syncGuidanceEpochToStorage();
   state.deepGuidanceOptIn = false;
@@ -866,6 +1202,9 @@ async function analyzeCurrentPage(userMessage) {
   removeStaleAnalyzeTypingUI();
   const typingEl = showTyping();
   chrome.runtime.sendMessage({ type: 'CLEAR_HIGHLIGHTS' });
+  const engine = window.IG_DECISION;
+
+  const tAnalyze0 = performance.now();
 
   try {
     const pageInfo = await new Promise((resolve) => {
@@ -895,180 +1234,372 @@ async function analyzeCurrentPage(userMessage) {
         state.guidanceDomain = '';
       }
     }
-    let clientScreenshot;
-    let pageText = '';
-    let clickableCandidatesText = '';
     const canCapture =
       activeTab?.id &&
       !url.startsWith('chrome://') &&
       !url.startsWith('chrome-extension://') &&
       !url.startsWith('edge://');
 
-    const tCapture0 = performance.now();
-    if (canCapture) {
-      try {
-        const capWindowId = activeTab.windowId;
-        const dataUrl = await new Promise((resolve, reject) => {
-          chrome.tabs.captureVisibleTab(capWindowId, { format: 'png' }, (du) => {
-            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-            else resolve(du);
-          });
-        });
-        const [textPayload, candRes] = await Promise.all([
-          new Promise((resolve) => {
-            chrome.tabs.sendMessage(activeTab.id, { type: 'GET_PAGE_TEXT' }, (res) => {
-              if (chrome.runtime.lastError) resolve({ text: '' });
-              else resolve(res || { text: '' });
-            });
-          }),
-          getClickableCandidatesFromTab(activeTab.id),
-        ]);
-        pageText = textPayload?.text || '';
-        clickableCandidatesText = candRes?.text || '';
-        clientScreenshot = await downscaleDataUrlForGemini(dataUrl);
-      } catch {
-        clientScreenshot = undefined;
-      }
-    }
-    const captureMs = performance.now() - tCapture0;
+    setAnalyzeStatus(typingEl, 'Reading this page…');
+    const tCand0 = performance.now();
+    const candRes = canCapture
+      ? await getClickableCandidatesFromTab(activeTab.id)
+      : { rows: [], text: '', domSig: '' };
+    const candRows = Array.isArray(candRes?.rows) ? candRes.rows : [];
+    const domSig = candRes?.domSig || '';
+    const compactCandidatesText = engine.buildCompactCandidatesText(candRows, 1500);
+    const candMs = performance.now() - tCand0;
 
     if (runEpoch !== state.guidanceEpoch) {
       removeEl(typingEl);
       return;
     }
 
-    let scanSummaryLine = '';
-    if (clientScreenshot) {
-      setAnalyzeStatus(typingEl, 'Scanning top 50% of viewport…');
-    } else {
-      setAnalyzeStatus(
-        typingEl,
-        'No live screenshot. Using page text or a server snapshot…'
-      );
-      scanSummaryLine =
-        '📐 **Viewport:** No live screenshot, so we did not split the screen into top and bottom scans.';
+    const hasKey = hasActiveLlmKey();
+    const provider = state.llmProvider;
+    const apiKey = getApiKeyForProvider(provider).trim();
+    const cacheKey = engine.makeCacheKey(state.guidanceDomain, userMessage);
+
+    // Stage 1 — cache + heuristic shortcut (zero network).
+    // Bust stale cache entries when the user asks the same goal again quickly:
+    // a recent hit means the previous answer was not helpful, so force a fresh pass.
+    setAnalyzeStatus(typingEl, 'Checking for a shortcut…');
+    const tStage1 = performance.now();
+    const now = Date.now();
+    const cacheBypassRecent =
+      Number(state.lastCachePick?.[cacheKey]) > 0 &&
+      now - Number(state.lastCachePick[cacheKey]) < 120_000;
+    const cacheBypassFromNextStep = state.cacheBustedKeys?.has(cacheKey);
+    const cacheBypass = cacheBypassRecent || cacheBypassFromNextStep;
+
+    let cacheMap = await loadIgCache();
+    if (cacheBypass) {
+      await deleteIgCache(cacheKey).catch(() => {});
+      cacheMap = { ...cacheMap };
+      delete cacheMap[cacheKey];
+      if (state.lastCachePick) delete state.lastCachePick[cacheKey];
+      state.cacheBustedKeys?.delete(cacheKey);
     }
 
-    const baseAnalyzePayload = {
-      url,
-      userMessage,
-      firecrawlKey: state.firecrawlKey,
-      llmProvider: state.llmProvider,
-      apiKey: getApiKeyForProvider(state.llmProvider).trim(),
-      pageText,
-      pageTitle: pageInfo?.title || activeTab?.title || '',
-    };
+    let stage = null;
+    let response = null;
+    let scanSummaryLine = '';
 
-    const runAnalyze = (extra) =>
-      new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage(
-          { type: 'ANALYZE_PAGE', payload: { ...baseAnalyzePayload, ...extra } },
-          (res) => {
-            if (res?.error && !res.success) reject(new Error(res.error));
-            else resolve(res);
-          }
-        );
+    const cacheHit = engine.tryCacheResolve({
+      cache: cacheMap, cacheKey, domSig, candidates: candRows,
+    });
+    if (cacheHit?.hit) {
+      response = buildResponseFromCandidate(cacheHit.row, {
+        source: 'cache',
+        description: `Click **${cacheHit.row.label}** — remembered from a previous visit.`,
+        confidence: 0.95,
+        pageTitle: pageInfo?.title || activeTab?.title || '',
       });
-
-    const tAnalyze0 = performance.now();
-    let response;
-    /** Run bottom half only if top is uncertain or fell back to text-only guidance. */
-    const PHASE2_CONF_THRESHOLD = 0.58;
-    /** If both halves stay below this after comparison, one full-viewport vision pass disambiguates. */
-    const WEAK_SPLIT_MAX_CONF = 0.44;
-    /** Full pass must beat the best half by this margin to replace the pick. */
-    const FULL_VIEWPORT_MARGIN = 0.07;
-
-    if (!clientScreenshot) {
-      response = await runAnalyze({ clientScreenshot, clickableCandidatesText });
+      stage = 'cache';
+      scanSummaryLine = '⚡ **Shortcut:** recognized this goal on this site from a previous visit.';
+      state.lastCachePick[cacheKey] = now;
     } else {
-      const topImg = await cropDataUrlVerticalSlice(clientScreenshot, 0, 0.5);
-      const resTop = await runAnalyze({
-        clientScreenshot: topImg,
-        clickableCandidatesText,
-        viewportImageRegion: 'top_half',
-      });
+      const heur = engine.runStage1Heuristic({ goal: userMessage, candidates: candRows });
+      if (heur?.hit) {
+        response = buildResponseFromCandidate(heur.row, {
+          source: 'heuristic',
+          description: `Click **${heur.row.label}**.`,
+          confidence: 0.9,
+          pageTitle: pageInfo?.title || activeTab?.title || '',
+        });
+        stage = 'heuristic';
+        scanSummaryLine = `⚡ **Fast match:** matched a common "${heur.intent}" control on this page.`;
+      }
+    }
+    const stage1Ms = performance.now() - tStage1;
+
+    // Warm the capture in parallel when we'll likely need Stage 3
+    let capturePromise = null;
+    if (!response && canCapture && hasKey && engine.shouldWarmCapture(userMessage)) {
+      capturePromise = captureVisibleTabDataUrl(activeTab.windowId).catch(() => null);
+    }
+
+    // Stage 2 — text-only triage with a fast model
+    let triageRes = null;
+    let stage2Ms = 0;
+    if (!response && hasKey && candRows.length) {
+      setAnalyzeStatus(typingEl, `Quick text check with ${providerDisplayName(provider)}…`);
+      const tStage2 = performance.now();
+      try {
+        triageRes = await requestTextTriage({
+          userMessage,
+          pageTitle: pageInfo?.title || activeTab?.title || '',
+          pageUrl: url,
+          candidatesText: compactCandidatesText,
+          doneSteps: state.guidanceStepsDone,
+          llmProvider: provider,
+          apiKey,
+        });
+      } catch (e) {
+        triageRes = { error: String(e?.message || e) };
+      }
+      stage2Ms = performance.now() - tStage2;
+
       if (runEpoch !== state.guidanceEpoch) {
         removeEl(typingEl);
         return;
       }
 
-      const cTopRaw = Number(resTop.confidence);
-      const cTop = Number.isFinite(cTopRaw) ? cTopRaw : 0;
-      const needBottom =
-        cTop < PHASE2_CONF_THRESHOLD || Boolean(resTop.usedFallback);
+      if (triageRes && !triageRes.error) {
+        const gate = validateTriageAcceptance(triageRes, candRows);
+        if (gate.accepted) {
+          const row = candRows[gate.idx];
+          response = buildResponseFromCandidate(row, {
+            source: 'text_llm',
+            description: triageRes.description,
+            confidence: triageRes.confidence,
+            stepSummary: triageRes.stepSummary,
+            isMultiStep: triageRes.isMultiStep,
+            overallPlan: triageRes.overallPlan,
+            elementLabel: triageRes.elementLabel || row.label,
+            pageTitle: pageInfo?.title || activeTab?.title || '',
+            llmTimings: triageRes.timings,
+          });
+          stage = 'text_llm';
+          scanSummaryLine = `⚡ **Fast pass:** matched by label in ${Math.round(stage2Ms)} ms.`;
+        }
+      }
+    }
 
-      if (!needBottom) {
-        response = mapPhaseResponseToViewport(resTop, 'top');
-        scanSummaryLine = `📐 **Viewport:** Top half only (${Math.round(cTop * 100)}% confidence). Bottom half not needed.`;
-      } else {
-        setAnalyzeStatus(typingEl, 'Scanning bottom 50% of viewport…');
-        const botImg = await cropDataUrlVerticalSlice(clientScreenshot, 0.5, 1);
-        const resBot = await runAnalyze({
-          clientScreenshot: botImg,
-          clickableCandidatesText,
-          viewportImageRegion: 'bottom_half',
+    // Stage 3 — SoM vision fallback
+    let stage3Ms = 0;
+    if (!response && hasKey) {
+      const captureOnlyNoCandidates = canCapture && candRows.length === 0;
+      if (!canCapture) {
+        setAnalyzeStatus(typingEl, 'No live screenshot. Using server snapshot…');
+        const tFb = performance.now();
+        response = await requestServerAnalyze({
+          url,
+          userMessage,
+          firecrawlKey: state.firecrawlKey,
+          llmProvider: provider,
+          apiKey,
+          pageText: '',
+          pageTitle: pageInfo?.title || activeTab?.title || '',
+          clickableCandidatesText: '',
         });
+        stage3Ms = performance.now() - tFb;
+        stage = 'som_vision';
+        scanSummaryLine = '📄 **Server snapshot:** used a remote page render (live capture unavailable).';
+      } else if (captureOnlyNoCandidates) {
+        setAnalyzeStatus(typingEl, `Full-screen vision with ${providerDisplayName(provider)}…`);
+        const raw = await captureVisibleTabDataUrl(activeTab.windowId).catch(() => null);
+        if (raw) {
+          const scaled = await downscaleDataUrlForGemini(raw);
+          const tFv = performance.now();
+          response = await requestServerAnalyze({
+            url,
+            userMessage,
+            firecrawlKey: state.firecrawlKey,
+            llmProvider: provider,
+            apiKey,
+            clientScreenshot: scaled,
+            pageText: '',
+            pageTitle: pageInfo?.title || activeTab?.title || '',
+            clickableCandidatesText: '',
+          });
+          stage3Ms = performance.now() - tFv;
+          stage = 'som_vision';
+          scanSummaryLine = '🔍 **Vision pass:** full viewport (no DOM candidates available).';
+        } else {
+          removeEl(typingEl);
+          addMessage('assistant', '⚠️ Could not capture this tab.');
+          return;
+        }
+      } else {
+        setAnalyzeStatus(typingEl, `Zooming in with ${providerDisplayName(provider)} vision…`);
+        const k = Math.min(10, Math.max(3, candRows.length));
+        const topK = computeSomTopKIndices(candRows, userMessage, triageRes, k);
+
+        const [hull, rawCapture] = await Promise.all([
+          computeCropHullFromTab(activeTab.id, topK),
+          capturePromise || captureVisibleTabDataUrl(activeTab.windowId).catch(() => null),
+        ]);
         if (runEpoch !== state.guidanceEpoch) {
           removeEl(typingEl);
           return;
         }
 
-        const cBotRaw = Number(resBot.confidence);
-        const cBot = Number.isFinite(cBotRaw) ? cBotRaw : 0;
-        const topMapped = mapPhaseResponseToViewport(resTop, 'top');
-        const botMapped = mapPhaseResponseToViewport(resBot, 'bottom');
-        const winner = pickSplitViewportWinner(resTop, resBot, topMapped, botMapped);
-        response = winner.mapped;
-        const maxSplit = Math.max(cTop, cBot);
-        const pickNote =
-          winner.pick === 'fallback'
-            ? ' Picked the side that pointed at a real control when scores were close.'
-            : '';
-        const winHalf = winner.halfLabel === 'lower' ? 'Lower' : 'Upper';
-        const otherPct =
-          winner.halfLabel === 'lower' ? Math.round(cTop * 100) : Math.round(cBot * 100);
-        scanSummaryLine = `📐 **Viewport:** Checked top and bottom. **${winHalf} half** looked best (${Math.round(winner.choiceConf * 100)}% vs ${otherPct}% on the other).${pickNote}`;
-
-        const gt = resTop.timings?.llmMs;
-        const gb = resBot.timings?.llmMs;
-        let sumG =
-          (typeof gt === 'number' ? gt : 0) + (typeof gb === 'number' ? gb : 0);
-
-        if (maxSplit < WEAK_SPLIT_MAX_CONF) {
-          setAnalyzeStatus(typingEl, 'Split view was unclear. Checking the full screen…');
-          const resFull = await runAnalyze({
-            clientScreenshot,
-            clickableCandidatesText,
-            viewportImageRegion: 'full',
-          });
-          if (runEpoch !== state.guidanceEpoch) {
-            removeEl(typingEl);
-            return;
-          }
-          const cFullRaw = Number(resFull.confidence);
-          const cFull = Number.isFinite(cFullRaw) ? cFullRaw : 0;
-          const gf = resFull.timings?.llmMs;
-          sumG += typeof gf === 'number' ? gf : 0;
-          if (cFull > maxSplit + FULL_VIEWPORT_MARGIN) {
-            response = { ...resFull };
-            scanSummaryLine = `📐 **Viewport:** Full screen (${Math.round(cFull * 100)}% confidence). Split halves were weak (top ${Math.round(cTop * 100)}%, bottom ${Math.round(cBot * 100)}%).`
-          } else {
-            scanSummaryLine += ` Full screen (${Math.round(cFull * 100)}%) was not clearly better, so we kept the split pick.`
-          }
+        if (!rawCapture) {
+          removeEl(typingEl);
+          addMessage('assistant', '⚠️ Could not capture this tab for a vision pass.');
+          return;
         }
 
-        response = { ...response, timings: { ...response.timings, llmMs: sumG } };
+        const scaled = await downscaleDataUrlForGemini(rawCapture);
+        const useFull = Boolean(hull?.fullViewport);
+        const cropRect = useFull ? { x: 0, y: 0, w: 100, h: 100 } : hull;
+        const cropped = useFull ? scaled : await cropDataUrlByRect(scaled, cropRect);
+
+        const somBoxes = topK
+          .map((idx) => {
+            const row = candRows.find((r) => r.idx === idx);
+            if (!row) return null;
+            return {
+              number: row.idx,
+              xPct: (row.xPct || 0) - (row.wPct || 0) / 2,
+              yPct: (row.yPct || 0) - (row.hPct || 0) / 2,
+              wPct: row.wPct || 0,
+              hPct: row.hPct || 0,
+            };
+          })
+          .filter(Boolean);
+
+        const annotated = await drawSomOverlay(cropped, cropRect, somBoxes);
+
+        const somList = topK
+          .map((idx) => {
+            const row = candRows.find((r) => r.idx === idx);
+            if (!row) return null;
+            return `${row.idx}|${row.role}|${String(row.label || '').slice(0, 40)}`;
+          })
+          .filter(Boolean)
+          .join('\n');
+
+        const tStage3 = performance.now();
+        let somRes = null;
+        try {
+          somRes = await requestSomVision({
+            screenshot: annotated,
+            userMessage,
+            pageTitle: pageInfo?.title || activeTab?.title || '',
+            pageUrl: url,
+            somList,
+            doneSteps: state.guidanceStepsDone,
+            llmProvider: provider,
+            apiKey,
+          });
+        } catch (e) {
+          throw e;
+        }
+        stage3Ms = performance.now() - tStage3;
+
+        if (runEpoch !== state.guidanceEpoch) {
+          removeEl(typingEl);
+          return;
+        }
+
+        const chosen = Number(somRes?.candidateIndex);
+        const chosenRow = Number.isFinite(chosen) && chosen >= 0
+          ? candRows.find((r) => r.idx === chosen)
+          : null;
+
+        if (chosenRow) {
+          // Never trust the LLM's elementLabel for SoM — it often disagrees with the
+          // box it actually picked. The DOM row is the source of truth for both the
+          // highlight target and the visible label in the tip bubble.
+          const authoritativeLabel = chosenRow.label;
+          const modelLabel = String(somRes?.elementLabel || '').trim();
+          const labelAgrees = rowLabelMatchesText(chosenRow.label, modelLabel);
+          const goalAlignsWithRow = rowAlignsWithGoal(chosenRow.label, userMessage);
+
+          // Rewrite the description if the model's label disagrees with the row,
+          // so the tip bubble does not say "Sponsors" while highlighting "Stars".
+          const rawDescription = String(somRes?.description || '').trim();
+          const mentionsRowLabel = rawDescription
+            ? rowLabelMatchesText(chosenRow.label, rawDescription)
+            : false;
+          const description = labelAgrees || mentionsRowLabel || !rawDescription
+            ? (rawDescription || `Click **${authoritativeLabel}**.`)
+            : `Click **${authoritativeLabel}** — closest thing I can see for this goal here. If it is not the right control, tap **Next step**.`;
+
+          // Demote confidence when the model's pick has zero goal-keyword overlap —
+          // prevents a confident wrong highlight from being written to cache.
+          const rawConf = Number(somRes?.confidence);
+          const baseConf = Number.isFinite(rawConf) ? Math.max(0, Math.min(1, rawConf)) : 0.4;
+          let adjustedConf = baseConf;
+          if (!goalAlignsWithRow && !labelAgrees) adjustedConf = Math.min(adjustedConf, 0.45);
+          else if (!goalAlignsWithRow) adjustedConf = Math.min(adjustedConf, 0.6);
+
+          response = buildResponseFromCandidate(chosenRow, {
+            source: 'som_vision',
+            description,
+            confidence: adjustedConf,
+            stepSummary: somRes.stepSummary,
+            isMultiStep: somRes.isMultiStep,
+            overallPlan: somRes.overallPlan,
+            elementLabel: authoritativeLabel,
+            pageTitle: pageInfo?.title || activeTab?.title || '',
+            llmTimings: somRes.timings,
+          });
+        } else if (somRes) {
+          response = {
+            ...somRes,
+            pageTitle: pageInfo?.title || activeTab?.title || '',
+            usedRemoteScrape: false,
+          };
+        }
+        stage = 'som_vision';
+        scanSummaryLine = useFull
+          ? '🔍 **Vision pass:** scanned the full viewport.'
+          : '🔍 **Vision pass:** zoomed into the most likely region.';
       }
     }
 
+    if (!response && !hasKey) {
+      removeEl(typingEl);
+      addMessage(
+        'assistant',
+        '⚠️ Add your API key for the selected provider in **Settings** first — only one key is required.'
+      );
+      return;
+    }
+
     const analyzeWallMs = performance.now() - tAnalyze0;
+    const usedVision = stage === 'som_vision';
     igLog('timings', {
-      captureMs: Math.round(captureMs),
+      stage,
+      cacheHit: stage === 'cache',
+      escalated: usedVision,
+      candMs: Math.round(candMs),
+      stage1Ms: Math.round(stage1Ms),
+      stage2Ms: Math.round(stage2Ms),
+      stage3Ms: Math.round(stage3Ms),
       analyzeMs: Math.round(analyzeWallMs),
       ...(response?.timings || {}),
       usedRemoteScrape: Boolean(response?.usedRemoteScrape),
     });
+
+    // Write cache on a confident, labeled pick (skip server-snapshot results — too unreliable).
+    // Extra guards prevent poisoning the cache with hallucinated picks:
+    //  - require ≥ 0.8 confidence (was 0.7)
+    //  - require the elementLabel to reference the DOM row we are highlighting
+    //  - require the row label to share at least one goal token (so "Stars" cannot
+    //    get cached for "add sponsors")
+    const cacheWriteRow = Number.isFinite(response?.candidateIndex) && response.candidateIndex >= 0
+      ? candRows.find((r) => r.idx === response.candidateIndex)
+      : null;
+    const labelAgreesWithRow = cacheWriteRow
+      ? rowLabelMatchesText(cacheWriteRow.label, response?.elementLabel || '')
+      : false;
+    const rowAlignsWithAsk = cacheWriteRow
+      ? rowAlignsWithGoal(cacheWriteRow.label, userMessage)
+      : false;
+    if (
+      response &&
+      stage &&
+      stage !== 'cache' &&
+      !response.usedRemoteScrape &&
+      Number(response.confidence) >= 0.8 &&
+      response.elementLabel &&
+      cacheWriteRow &&
+      labelAgreesWithRow &&
+      rowAlignsWithAsk
+    ) {
+      writeIgCache(cacheKey, {
+        elementLabel: String(response.elementLabel).slice(0, 80),
+        labelNorm: engine.normalizeLabel(response.elementLabel).slice(0, 80),
+        domSig,
+        xPct: Number(response.x) || 0,
+        yPct: Number(response.y) || 0,
+        ts: Date.now(),
+      });
+    }
 
     removeEl(typingEl);
 
@@ -1241,33 +1772,6 @@ function removeStaleAnalyzeTypingUI() {
   root.querySelectorAll('.msg.assistant.analyze-typing').forEach((el) => el.remove());
 }
 
-/**
- * Choose top vs bottom half using confidence, with fallback awareness (non-fallback wins when close).
- */
-function pickSplitViewportWinner(resTop, resBot, topMapped, botMapped) {
-  const cTop = (() => {
-    const n = Number(resTop?.confidence);
-    return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0;
-  })();
-  const cBot = (() => {
-    const n = Number(resBot?.confidence);
-    return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0;
-  })();
-  const fbT = Boolean(resTop?.usedFallback);
-  const fbB = Boolean(resBot?.usedFallback);
-
-  if (fbT && !fbB && cBot >= cTop - 0.12) {
-    return { mapped: botMapped, halfLabel: 'lower', choiceConf: cBot, pick: 'fallback' };
-  }
-  if (!fbT && fbB && cTop >= cBot - 0.12) {
-    return { mapped: topMapped, halfLabel: 'upper', choiceConf: cTop, pick: 'fallback' };
-  }
-
-  if (cBot > cTop) {
-    return { mapped: botMapped, halfLabel: 'lower', choiceConf: cBot, pick: 'confidence' };
-  }
-  return { mapped: topMapped, halfLabel: 'upper', choiceConf: cTop, pick: 'confidence' };
-}
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function formatMd(t) {
   const badges = [];

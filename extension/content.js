@@ -11,11 +11,22 @@ if (!window.__integrationGuideListeners) {
 
     if (message.type === 'GET_CLICKABLE_CANDIDATES') {
       try {
-        const text = formatClickableCandidatesForPrompt();
-        const count = getOrderedViewportClickables(IG_MAX_CANDIDATES).length;
-        sendResponse({ text, count });
+        const rows = getMinimalCandidateRows(IG_MAX_CANDIDATES);
+        const text = formatCompactCandidateRows(rows);
+        const domSig = computeDomSig(rows);
+        sendResponse({ text, rows, domSig, count: rows.length });
       } catch (e) {
-        sendResponse({ text: '', count: 0, error: String(e?.message || e) });
+        sendResponse({ text: '', rows: [], domSig: '', count: 0, error: String(e?.message || e) });
+      }
+      return true;
+    }
+
+    if (message.type === 'COMPUTE_CROP_HULL') {
+      try {
+        const hull = computeCropHullForIndices(Array.isArray(message.indices) ? message.indices : []);
+        sendResponse(hull);
+      } catch (e) {
+        sendResponse({ x: 0, y: 0, w: 100, h: 100, fullViewport: true, error: String(e?.message || e) });
       }
       return true;
     }
@@ -320,6 +331,95 @@ function formatClickableCandidatesForPrompt() {
       return `${i}\t${item.role}\t"${item.label}"\t~${xPct}%,${yPct}%`;
     })
     .join('\n');
+}
+
+/** Minimal rows for the cascade; cheap to serialize and pass around. */
+function getMinimalCandidateRows(max = IG_MAX_CANDIDATES) {
+  const list = getOrderedViewportClickables(max);
+  return list.map((item, i) => {
+    const xPct = Math.round((item.cx / item.vw) * 100);
+    const yPct = Math.round((item.cy / item.vh) * 100);
+    const wPct = Math.round((item.r.width / item.vw) * 100);
+    const hPct = Math.round((item.r.height / item.vh) * 100);
+    return {
+      idx: i,
+      role: item.role,
+      label: item.label,
+      labelNorm: normalizeLabel(item.label),
+      xPct,
+      yPct,
+      wPct,
+      hPct,
+    };
+  });
+}
+
+function formatCompactCandidateRows(rows) {
+  return rows
+    .map((r) => `${r.idx}\t${r.role}\t"${r.label}"\t~${r.xPct}%,${r.yPct}%`)
+    .join('\n');
+}
+
+/** 32-bit FNV-1a — stable across page loads for the same ordered label/role list. */
+function fnvHash32(input) {
+  const str = String(input || '');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
+function computeDomSig(rows) {
+  if (!Array.isArray(rows) || !rows.length) return '';
+  const s = rows.map((r) => `${r.role}:${r.labelNorm}`).join('|');
+  return fnvHash32(s).slice(0, 12);
+}
+
+/**
+ * Axis-aligned bounding hull in viewport percentages for the given candidate indices,
+ * padded ~8% and clamped. Returns { x, y, w, h, fullViewport } where fullViewport
+ * means the hull is so large the caller should just send the whole screenshot.
+ */
+function computeCropHullForIndices(indices) {
+  const list = getOrderedViewportClickables(IG_MAX_CANDIDATES);
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const rects = (Array.isArray(indices) ? indices : [])
+    .map((i) => list[i])
+    .filter(Boolean)
+    .map((it) => it.r);
+
+  if (!rects.length) {
+    return { x: 0, y: 0, w: 100, h: 100, fullViewport: true };
+  }
+
+  let left = Math.min.apply(null, rects.map((r) => r.left));
+  let top = Math.min.apply(null, rects.map((r) => r.top));
+  let right = Math.max.apply(null, rects.map((r) => r.right));
+  let bottom = Math.max.apply(null, rects.map((r) => r.bottom));
+
+  const padX = vw * 0.08;
+  const padY = vh * 0.08;
+  left = Math.max(0, left - padX);
+  top = Math.max(0, top - padY);
+  right = Math.min(vw, right + padX);
+  bottom = Math.min(vh, bottom + padY);
+
+  const xPct = (left / vw) * 100;
+  const yPct = (top / vh) * 100;
+  const wPct = ((right - left) / vw) * 100;
+  const hPct = ((bottom - top) / vh) * 100;
+  const fullViewport = wPct >= 85 && hPct >= 85;
+
+  return {
+    x: xPct,
+    y: yPct,
+    w: wPct,
+    h: hPct,
+    fullViewport,
+  };
 }
 
 function rectVisibleRatio(r, vw, vh) {
