@@ -194,9 +194,10 @@
     .guidance-bar {
       display: none;
       flex-shrink: 0;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
+      flex-direction: column;
+      align-items: stretch;
+      justify-content: flex-start;
+      gap: 8px;
       padding: 10px 16px;
       border-bottom: 1px solid var(--border);
       background: var(--surface-2);
@@ -210,6 +211,11 @@
       min-width: 0;
     }
     .guidance-btns { display: flex; gap: 6px; flex-shrink: 0; }
+    .guidance-btns {
+      width: 100%;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
     .guidance-btn {
       font-family: inherit;
       font-size: 11px;
@@ -269,6 +275,7 @@
     <span class="guidance-status" id="guidance-status"></span>
     <div class="guidance-btns">
       <button type="button" class="guidance-btn primary" id="next-step-btn">Next step</button>
+      <button type="button" class="guidance-btn" id="forget-goal-btn">Forget goal memory</button>
       <button type="button" class="guidance-btn" id="reset-guidance-btn">New goal</button>
     </div>
   </div>

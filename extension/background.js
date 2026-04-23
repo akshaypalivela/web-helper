@@ -666,9 +666,11 @@ RULES:
 - Pick the single row the user should click NEXT toward their goal.
 - candidateIndex MUST be one of the listed idx values. Use -1 only if no row fits.
 - elementLabel MUST match that row's label verbatim (accents included).
+- Label/index consistency is strict: if elementLabel says "Sponsors", candidateIndex must point to a row whose label is exactly/clearly Sponsors. Never map Sponsors to Stars, Contribution settings, or any unrelated row.
 - Multilingual UIs: map intent semantically (Careers↔Karriere/Empleo, Settings↔Einstellungen, etc.).
 - SITE SEARCH IS LAST RESORT. Do NOT choose a header search field, search icon, or Cmd/Ctrl-K unless the user explicitly asked to search OR no browse/nav path in the candidates leads toward the goal. If you fall back to search, say so in description and keep confidence below 0.55.
 - When the screen does not contain a direct next step (e.g. wrong page after several attempts), prefer Back, breadcrumbs, Settings, Account, Help, or a clearly relevant nav link — mention briefly in description.
+- GitHub Sponsors rule: when intent mentions sponsors and candidates include a Sponsors row in an open account/profile menu, choose that Sponsors row. Do not choose Stars or contribution controls for this intent.
 - For multi-screen goals, set isMultiStep true and give a short overallPlan (2–4 sentences). Still return ONE action for now. stepSummary is a past-tense line suitable for step history.
 - Lower confidence when the visible candidates do not clearly match the goal. Confidence below 0.66 tells downstream code to escalate to a vision pass.
 - Return ONLY a valid JSON object matching the schema. No markdown fences, no text outside JSON.`;
@@ -903,9 +905,11 @@ function buildSomSystemInstruction() {
 RULES:
 - Return the integer number printed on the box the user should click NEXT, in chosenNumber. If no box fits, set chosenNumber to -1.
 - elementLabel MUST match the label of the box whose number you chose (verbatim, accents included).
+- Strict consistency: if elementLabel says "Sponsors", chosenNumber must correspond to a Sponsors-labeled row in the numbered candidate list. Never label one element while choosing a different numbered box.
 - Coordinates are NOT required — the extension resolves them from the chosen number.
 - Prefer browse/nav/settings over site search. Use search only if the user explicitly asked OR no browse/nav path leads toward the goal; if you do, say so in description and keep confidence below 0.6.
 - Multi-screen goals: set isMultiStep true and fill overallPlan with a 2–4 sentence outline; still pick ONE action for now. stepSummary is one past-tense line for step history.
+- GitHub Sponsors rule: if the screenshot shows an open avatar/profile dropdown and a Sponsors row is visible, pick that Sponsors row. Never pick Stars or contribution graph controls for "add sponsors" style intents.
 - If no numbered box matches the goal, set chosenNumber -1, confidence 0, and use description to explain what to do next (scroll, go Back, open a menu, try Settings, etc.).
 - Return ONLY a valid JSON object matching the schema. No markdown fences, no text outside JSON.`;
 }

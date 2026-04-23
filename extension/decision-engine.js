@@ -7,6 +7,12 @@
   'use strict';
 
   const NS = {};
+  const GOAL_STOPWORDS = new Set([
+    'the', 'and', 'for', 'with', 'this', 'that', 'please', 'help', 'want', 'need', 'how',
+    'get', 'can', 'you', 'your', 'about', 'from', 'into', 'onto', 'add', 'set', 'let', 'use',
+    'tab', 'button', 'link', 'click', 'open', 'goto', 'next', 'step', 'page', 'here', 'show',
+    'make', 'take', 'give', 'put', 'there', 'still', 'correctly', 'option', 'options',
+  ]);
 
   function fnvHash(input) {
     const str = String(input || '');
@@ -34,6 +40,40 @@
       .replace(/['`"]/g, '')
       .replace(/\s+/g, ' ')
       .trim();
+  }
+
+  function tokenizeWords(text) {
+    const s = normalizeLabel(text);
+    if (!s) return [];
+    return (s.match(/[a-z0-9]+/g) || []).filter((t) => t.length >= 3);
+  }
+
+  function includesAny(text, aliases) {
+    const n = normalizeLabel(text);
+    if (!n) return false;
+    return aliases.some((a) => n.includes(normalizeLabel(a)));
+  }
+
+  function parseUrlParts(rawUrl) {
+    const text = String(rawUrl || '').trim();
+    if (!text) return { host: '', path: '' };
+    if (typeof URL !== 'undefined') {
+      try {
+        const u = new URL(text);
+        return {
+          host: String(u.hostname || '').toLowerCase(),
+          path: String(u.pathname || ''),
+        };
+      } catch (_) {}
+    }
+    const m = text.match(/^https?:\/\/([^/?#]+)(\/[^?#]*)?/i);
+    if (m) {
+      return {
+        host: String(m[1] || '').toLowerCase(),
+        path: String(m[2] || ''),
+      };
+    }
+    return { host: '', path: '' };
   }
 
   /** Provider-specific fast model for the text-only triage stage. */
@@ -74,6 +114,11 @@
   /** Common label aliases by intent. Extends the content-script keyword taxonomy. */
   const SHORTCUT_INTENTS = [
     {
+      name: 'sponsors',
+      test: /\b(sponsor|sponsors|github sponsors|add sponsors?)\b/i,
+      labels: ['sponsor', 'sponsors', 'github sponsors', 'become a sponsor'],
+    },
+    {
       name: 'settings',
       test: /\b(settings?|preferences?|account\s+settings|configure|configuration)\b/i,
       labels: [
@@ -112,6 +157,20 @@
       ],
     },
     {
+      name: 'integrations',
+      test: /\b(integrations?|connected apps?|app integrations?|plugins?|marketplace)\b/i,
+      labels: [
+        'integrations',
+        'integration',
+        'connected apps',
+        'apps',
+        'app marketplace',
+        'marketplace',
+        'plugins',
+        'application',
+      ],
+    },
+    {
       name: 'help',
       test: /\b(help|support|contact|faq|docs?|documentation)\b/i,
       labels: [
@@ -139,6 +198,32 @@
         'careers', 'career', 'jobs', 'join us', 'work with us',
         'karriere', 'stellen', 'stellenangebote', 'empleo', 'carrière', 'carrieres',
         'carreiras', 'lavoro', 'vacancies', 'vacature',
+      ],
+    },
+  ];
+
+  const FLOW_POLICIES = [
+    {
+      name: 'github_sponsors',
+      testGoal: /\b(sponsor|sponsors|add sponsors?)\b/i,
+      testUrl: /(^|\.)github\.com$/i,
+      positive: ['sponsor', 'sponsors'],
+      negatives: [
+        'stars',
+        'starred',
+        'contribution settings',
+        'contribution activity',
+        'edit profile',
+      ],
+      menuCluster: ['profile', 'repositories', 'stars', 'settings'],
+      profileTabs: ['overview', 'repositories', 'projects', 'packages', 'stars'],
+      routeLabels: [
+        'profile',
+        'settings',
+        'account',
+        'avatar',
+        'my profile',
+        'user menu',
       ],
     },
   ];
@@ -174,6 +259,38 @@
     return null;
   }
 
+  function detectUiState({ candidates, pageUrl }) {
+    const rows = Array.isArray(candidates) ? candidates : [];
+    const labels = rows.map((r) => normalizeLabel(r?.label));
+    const { host, path } = parseUrlParts(pageUrl);
+    const onGithub = /(^|\.)github\.com$/.test(host);
+    const onGithubSettings = /^\/settings(\/|$)/.test(path);
+    const onGithubPublicProfile = /^\/[^/]+\/?$/.test(path);
+    const hasSponsorsVisible = labels.some((l) => includesAny(l, ['sponsor', 'sponsors']));
+    const hasProfileLabel = labels.some((l) => includesAny(l, ['profile']));
+    const hasSettingsLabel = labels.some((l) => includesAny(l, ['settings']));
+    const hasStarsLabel = labels.some((l) => includesAny(l, ['stars', 'starred']));
+    const hasRepositoriesLabel = labels.some((l) => includesAny(l, ['repositories']));
+    const hasProfileMenuRows =
+      Number(hasProfileLabel) +
+        Number(hasSettingsLabel) +
+        Number(hasStarsLabel) +
+        Number(hasRepositoriesLabel) >=
+      3;
+    const hasPublicProfileTabs =
+      labels.some((l) => includesAny(l, ['overview'])) &&
+      labels.some((l) => includesAny(l, ['repositories'])) &&
+      labels.some((l) => includesAny(l, ['stars']));
+    return {
+      onGithub,
+      onGithubSettings,
+      onGithubPublicProfile,
+      hasSponsorsVisible,
+      hasProfileMenuRows,
+      hasPublicProfileTabs,
+    };
+  }
+
   /**
    * Pure Stage-1 heuristic. Returns { hit, row, intent, score } or null.
    * Requires: top score >= 88, top beats 2nd by >= 14.
@@ -195,6 +312,189 @@
     if (second && top.score - second.score < 14) return null;
 
     return { hit: true, row: top.row, intent: shortcut.name, score: top.score };
+  }
+
+  function scoreCandidateForGoal({
+    goal,
+    row,
+    pageUrl = '',
+    uiState = null,
+    blockedFamilies = [],
+  }) {
+    const rowLabel = normalizeLabel(row?.label);
+    if (!rowLabel) return { score: -999, reasons: ['empty_label'] };
+    const reasons = [];
+    let score = 0;
+    const g = normalizeLabel(goal);
+    const goalTokens = tokenizeWords(g).filter((t) => !GOAL_STOPWORDS.has(t));
+    const rowTokens = tokenizeWords(rowLabel);
+    const tokenHits = goalTokens.filter((t) => rowTokens.includes(t)).length;
+    score += tokenHits * 10;
+    if (tokenHits) reasons.push(`token_hits:${tokenHits}`);
+
+    const shortcut = findShortcutIntent(goal);
+    if (shortcut) {
+      const shortcutScore = labelAliasScore(shortcut.labels, rowLabel);
+      score += Math.round(shortcutScore * 0.7);
+      if (shortcutScore) reasons.push(`shortcut:${shortcut.name}:${shortcutScore}`);
+    }
+
+    const parts = parseUrlParts(pageUrl);
+    const policy = FLOW_POLICIES.find(
+      (p) => p.testGoal.test(goal || '') && (!p.testUrl || p.testUrl.test(parts.host))
+    );
+    if (policy) {
+      if (includesAny(rowLabel, policy.positive)) {
+        score += 110;
+        reasons.push(`flow_positive:${policy.name}`);
+      }
+      if (includesAny(rowLabel, policy.negatives)) {
+        score -= 100;
+        reasons.push(`flow_negative:${policy.name}`);
+      }
+      if (uiState?.hasProfileMenuRows && includesAny(rowLabel, policy.menuCluster)) {
+        score += 8;
+      }
+      if (uiState?.hasPublicProfileTabs && includesAny(rowLabel, policy.profileTabs)) {
+        score += 6;
+      }
+      if (uiState?.hasProfileMenuRows && includesAny(rowLabel, ['sponsors'])) {
+        score += 25;
+        reasons.push('menu_sponsors_boost');
+      }
+    }
+
+    const blocked = new Set(Array.isArray(blockedFamilies) ? blockedFamilies : []);
+    for (const fam of blocked) {
+      if (!fam) continue;
+      if (fam === 'stars' && includesAny(rowLabel, ['stars', 'starred'])) {
+        score -= 130;
+        reasons.push('blocked_family:stars');
+      } else if (fam === 'contribution' && includesAny(rowLabel, ['contribution'])) {
+        score -= 130;
+        reasons.push('blocked_family:contribution');
+      } else if (fam === 'profile' && includesAny(rowLabel, ['profile'])) {
+        score -= 55;
+        reasons.push('blocked_family:profile');
+      } else if (fam === 'settings' && includesAny(rowLabel, ['settings'])) {
+        score -= 55;
+        reasons.push('blocked_family:settings');
+      }
+    }
+    return { score, reasons };
+  }
+
+  function rankCandidatesForGoal({
+    goal,
+    candidates,
+    pageUrl = '',
+    uiState = null,
+    blockedFamilies = [],
+    max = 20,
+  }) {
+    if (!Array.isArray(candidates) || !candidates.length) return [];
+    const ranked = candidates
+      .map((row) => {
+        const s = scoreCandidateForGoal({ goal, row, pageUrl, uiState, blockedFamilies });
+        return { row, score: s.score, reasons: s.reasons };
+      })
+      .sort((a, b) => b.score - a.score);
+    return ranked.slice(0, Math.max(1, Number(max) || 20));
+  }
+
+  function runFlowPolicyHeuristic({
+    goal,
+    pageUrl = '',
+    candidates,
+    uiState = null,
+    blockedFamilies = [],
+  }) {
+    if (!goal || !Array.isArray(candidates) || !candidates.length) return null;
+    const goalText = String(goal || '');
+    const state = uiState || detectUiState({ candidates, pageUrl });
+    const policy = FLOW_POLICIES.find((p) => p.testGoal.test(goalText));
+    if (!policy) return null;
+
+    const { host, path } = parseUrlParts(pageUrl);
+    if (!policy.testUrl.test(host)) return null;
+
+    const rows = candidates.map((r) => ({ row: r, n: normalizeLabel(r?.label) })).filter((x) => x.n);
+    const sponsorRow = rows.find((x) => includesAny(x.n, ['sponsor', 'sponsors']));
+    if (sponsorRow) {
+      return {
+        hit: true,
+        row: sponsorRow.row,
+        intent: 'github_sponsors',
+        policy: policy.name,
+        reason: state.hasProfileMenuRows ? 'profile_menu_sponsors_visible' : 'sponsors_visible',
+        score: 140,
+      };
+    }
+
+    // When the menu is open but Sponsors is not visible, do not pick Stars/contribution.
+    // Let later stages explain navigation with lower confidence instead.
+    if (state.hasProfileMenuRows) {
+      return null;
+    }
+
+    // Sponsors intent but Sponsors row not visible yet: route toward account/profile/settings
+    // entry points, but explicitly avoid distractors like Edit profile and contribution controls.
+    const routeCandidates = rows
+      .filter((x) => includesAny(x.n, policy.routeLabels || []))
+      .filter(
+        (x) =>
+          !includesAny(x.n, ['edit profile', 'contribution settings', 'contribution activity', 'stars', 'starred'])
+      );
+    if (routeCandidates.length) {
+      const bestRoute = routeCandidates[0];
+      const blocked = new Set(Array.isArray(blockedFamilies) ? blockedFamilies : []);
+      const fam = includesAny(bestRoute.n, ['settings'])
+        ? 'settings'
+        : includesAny(bestRoute.n, ['profile', 'account', 'avatar'])
+          ? 'profile'
+          : '';
+      if (!fam || !blocked.has(fam)) {
+        return {
+          hit: true,
+          row: bestRoute.row,
+          intent: 'github_sponsors',
+          policy: policy.name,
+          reason: 'route_to_profile_or_settings',
+          score: 98,
+        };
+      }
+    }
+
+    // On settings/edit pages, the deterministic move is "Profile" to route back to
+    // public profile where Sponsors controls are expected.
+    const onSettings = state.onGithubSettings || /^\/settings(\/|$)/.test(path);
+    if (onSettings) {
+      const profileRow = rows.find((x) => includesAny(x.n, ['profile']));
+      if (profileRow) {
+        const blocked = new Set(Array.isArray(blockedFamilies) ? blockedFamilies : []);
+        if (!blocked.has('profile')) {
+          return {
+            hit: true,
+            row: profileRow.row,
+            intent: 'github_sponsors',
+            policy: policy.name,
+            reason: 'settings_to_profile_route',
+            score: 102,
+          };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function fallbackUrlForGoal(goal, pageUrl = '') {
+    const g = String(goal || '').toLowerCase();
+    const { host } = parseUrlParts(pageUrl);
+    if (/\b(sponsor|sponsors|add sponsors?)\b/.test(g) && (!host || /(^|\.)github\.com$/.test(host))) {
+      return 'https://github.com/sponsors/accounts';
+    }
+    return '';
   }
 
   /**
@@ -240,7 +540,13 @@
   NS.pickFastModel = pickFastModel;
   NS.buildCompactCandidatesText = buildCompactCandidatesText;
   NS.SHORTCUT_INTENTS = SHORTCUT_INTENTS;
+  NS.FLOW_POLICIES = FLOW_POLICIES;
   NS.findShortcutIntent = findShortcutIntent;
+  NS.detectUiState = detectUiState;
+  NS.scoreCandidateForGoal = scoreCandidateForGoal;
+  NS.rankCandidatesForGoal = rankCandidatesForGoal;
+  NS.runFlowPolicyHeuristic = runFlowPolicyHeuristic;
+  NS.fallbackUrlForGoal = fallbackUrlForGoal;
   NS.runStage1Heuristic = runStage1Heuristic;
   NS.tryCacheResolve = tryCacheResolve;
   NS.decideStage = decideStage;

@@ -34,6 +34,8 @@ const state = {
   lastCachePick: Object.create(null),
   /** Cache keys the user has explicitly asked to skip (set on Next step). */
   cacheBustedKeys: new Set(),
+  /** Per-goal recent picks for loop guards (keyed by cacheKey). */
+  goalPickHistory: Object.create(null),
 };
 
 function getApiKeyForProvider(provider) {
@@ -322,15 +324,40 @@ function deleteIgCache(cacheKey) {
 }
 
 /** Called on Next step / reset so the next analyze skips a recently-served cache entry. */
-function markCurrentGoalCacheBusted(_reason) {
+function getCurrentGoalCacheKey() {
   const engine = typeof window !== 'undefined' ? window.IG_DECISION : null;
-  if (!engine) return;
+  if (!engine) return null;
   const goal = state.guidanceGoal || state.lastGoal || '';
-  const domain = state.guidanceDomain || '';
-  if (!goal || !domain) return;
-  const key = engine.makeCacheKey(domain, goal);
+  const domain = state.guidanceDomain || state.currentDomain || '';
+  if (!goal || !domain) return null;
+  return engine.makeCacheKey(domain, goal);
+}
+
+/** Called on Next step / reset so the next analyze skips a recently-served cache entry. */
+function markCurrentGoalCacheBusted(_reason) {
+  const key = getCurrentGoalCacheKey();
+  if (!key) return;
   state.cacheBustedKeys.add(key);
   deleteIgCache(key).catch(() => {});
+}
+
+/** User-facing reset for the current goal on this site: cache + per-goal memories + steps. */
+async function forgetCurrentGoalMemory() {
+  const key = getCurrentGoalCacheKey();
+  if (key) {
+    await deleteIgCache(key).catch(() => {});
+    if (state.lastCachePick) delete state.lastCachePick[key];
+    state.cacheBustedKeys?.delete(key);
+    if (state.goalPickHistory) delete state.goalPickHistory[key];
+  }
+  state.guidanceStepsDone = [];
+  state.lastGuidanceUrl = '';
+  state.taskCompletionPaused = false;
+  state.pauseAutoAnalysis = false;
+  state.awaitingContextChoice = false;
+  state.stickyManualPause = false;
+  hideContextStrip();
+  updateGuidanceBar();
 }
 
 function providerDisplayName(p) {
@@ -383,6 +410,170 @@ function rowLabelMatchesText(rowLabel, text) {
   for (const t of rowTokens) if (textTokens.has(t)) hits += 1;
   if (rowTokens.length === 1) return hits >= 1;
   return hits >= Math.min(2, Math.ceil(rowTokens.length / 2));
+}
+
+function labelFamily(label) {
+  const n = String(label || '').toLowerCase();
+  if (/\bsponsors?\b/.test(n)) return 'sponsors';
+  if (/\bstars?\b|\bstarred\b/.test(n)) return 'stars';
+  if (/\bcontribution/.test(n)) return 'contribution';
+  if (/\bprofile\b|\baccount\b|\bavatar\b/.test(n)) return 'profile';
+  if (/\bsettings?\b|\bpreferences?\b/.test(n)) return 'settings';
+  const t = tokenizeForMatch(n)[0];
+  return t || 'other';
+}
+
+function getBlockedFamilies(cacheKey, goal) {
+  if (!cacheKey) return [];
+  const hist = Array.isArray(state.goalPickHistory?.[cacheKey]) ? state.goalPickHistory[cacheKey] : [];
+  if (!hist.length) return [];
+  const now = Date.now();
+  const recent = hist.filter((h) => now - Number(h?.ts || 0) <= 10 * 60 * 1000);
+  const bad = recent.filter((h) => !h.aligned);
+  const counts = Object.create(null);
+  bad.forEach((h) => {
+    const fam = h.family || 'other';
+    counts[fam] = (counts[fam] || 0) + 1;
+  });
+  const blocked = Object.keys(counts).filter((fam) => counts[fam] >= 2);
+  if (!blocked.length) return [];
+  // Never block families that clearly align with the current goal intent.
+  return blocked.filter((fam) => !rowAlignsWithGoal(fam, goal));
+}
+
+function recordGoalPick(cacheKey, response, goal) {
+  if (!cacheKey || !response || !response.elementLabel) return;
+  const entry = {
+    label: String(response.elementLabel).slice(0, 80),
+    family: labelFamily(response.elementLabel),
+    aligned: rowAlignsWithGoal(response.elementLabel, goal),
+    confidence: Math.max(0, Math.min(1, Number(response.confidence) || 0)),
+    ts: Date.now(),
+  };
+  const prev = Array.isArray(state.goalPickHistory?.[cacheKey]) ? state.goalPickHistory[cacheKey] : [];
+  const next = [...prev, entry].slice(-8);
+  state.goalPickHistory[cacheKey] = next;
+}
+
+/**
+ * If the model returns a narrative low-confidence answer (no candidate index),
+ * recover a concrete clickable next step from DOM rows for known flows.
+ */
+function recoverActionableStepFromRows({
+  response,
+  intentGoal,
+  rows,
+  pageUrl,
+  uiState,
+  blockedFamilies,
+  pageTitle,
+}) {
+  const conf = Number(response?.confidence);
+  const ci = Number(response?.candidateIndex);
+  if (!Array.isArray(rows) || !rows.length) return null;
+  if (Number.isFinite(ci) && ci >= 0) return null;
+  if (Number.isFinite(conf) && conf > 0.25) return null;
+  if (!/\b(sponsor|sponsors)\b/i.test(String(intentGoal || '').toLowerCase())) return null;
+
+  const engine = typeof window !== 'undefined' ? window.IG_DECISION : null;
+  if (!engine?.rankCandidatesForGoal || !engine?.normalizeLabel) return null;
+
+  const ranked = engine.rankCandidatesForGoal({
+    goal: intentGoal,
+    candidates: rows,
+    pageUrl: pageUrl || '',
+    uiState: uiState || null,
+    blockedFamilies: Array.isArray(blockedFamilies) ? blockedFamilies : [],
+    max: 12,
+  });
+  if (!ranked.length) return null;
+
+  const norm = (s) => engine.normalizeLabel(String(s || ''));
+  const isBad = (label) =>
+    /\b(edit profile|contribution settings|contribution activity|stars?|starred)\b/.test(norm(label));
+  const has = (label, re) => re.test(norm(label));
+
+  let pick = ranked.find((r) => has(r?.row?.label, /\bsponsors?\b/));
+  let mode = 'direct_sponsors';
+  if (!pick) {
+    pick = ranked.find(
+      (r) =>
+        !isBad(r?.row?.label) &&
+        has(r?.row?.label, /\b(profile|account|avatar|settings|user menu)\b/)
+    );
+    mode = 'route_menu';
+  }
+  if (!pick || !pick.row) return null;
+
+  if (mode === 'direct_sponsors') {
+    return buildResponseFromCandidate(pick.row, {
+      source: 'policy_recovery',
+      description: `Click **${pick.row.label}**.`,
+      confidence: 0.9,
+      stepSummary: `Opened ${pick.row.label}`,
+      isMultiStep: true,
+      overallPlan:
+        'Open Sponsors first. If onboarding prompts appear, continue through the setup screens, then confirm your sponsors settings.',
+      elementLabel: pick.row.label,
+      pageTitle: pageTitle || '',
+    });
+  }
+
+  return buildResponseFromCandidate(pick.row, {
+    source: 'policy_recovery',
+    description: `Open **${pick.row.label}**, then choose **Sponsors** from that menu.`,
+    confidence: 0.62,
+    stepSummary: `Opened ${pick.row.label} menu`,
+    isMultiStep: true,
+    overallPlan:
+      'Open the account/profile menu first. Then select Sponsors. If Sponsors is still missing, use the direct sponsors accounts URL.',
+    elementLabel: pick.row.label,
+    pageTitle: pageTitle || '',
+  });
+}
+
+function applyCriticalIntentGuards(response, rows, intentGoal) {
+  if (!response || !Array.isArray(rows)) return response;
+  const goal = String(intentGoal || '').toLowerCase();
+  const ci = Number(response.candidateIndex);
+  const row =
+    Number.isFinite(ci) && ci >= 0
+      ? rows.find((r) => Number(r.idx) === Math.round(ci))
+      : null;
+  const rowLabel = String(row?.label || '').toLowerCase();
+  const desc = String(response.description || '').toLowerCase();
+  const el = String(response.elementLabel || '').toLowerCase();
+
+  const wantsSponsors = /\b(sponsor|sponsors)\b/.test(goal);
+  if (wantsSponsors && row) {
+    const rowIsSponsors = /\b(sponsor|sponsors)\b/.test(rowLabel);
+    const textClaimsSponsors = /\b(sponsor|sponsors)\b/.test(desc) || /\b(sponsor|sponsors)\b/.test(el);
+    if (textClaimsSponsors && !rowIsSponsors) {
+      return {
+        ...response,
+        candidateIndex: -1,
+        x: Number(response.x),
+        y: Number(response.y),
+        confidence: Math.min(Number(response.confidence) || 0, 0.35),
+        elementLabel: response.elementLabel || 'Profile menu',
+        description:
+          'Open your profile/avatar menu first, then choose **Sponsors**. If it is still missing, use the direct sponsors URL fallback.',
+      };
+    }
+  }
+
+  const wantsIntegrations = /\b(integrat|connected app|plugin|marketplace)\b/.test(goal);
+  if (wantsIntegrations && row) {
+    const rowLooksWeak = /\b(admin|application)\b/.test(rowLabel) && !/\bintegrat|connected app|plugin|marketplace\b/.test(rowLabel);
+    if (rowLooksWeak) {
+      return {
+        ...response,
+        candidateIndex: -1,
+        confidence: Math.min(Number(response.confidence) || 0, 0.45),
+      };
+    }
+  }
+  return response;
 }
 
 /** Build a guide-response shape from a DOM candidate row for cache / heuristic / triage / SoM hits. */
@@ -450,7 +641,7 @@ function requestServerAnalyze(payload) {
  *   2) Any rows whose label matches intent shortcut aliases
  *   3) Fill up with the first N in reading order
  */
-function computeSomTopKIndices(rows, userMessage, triage, k = 10) {
+function computeSomTopKIndices(rows, userMessage, triage, k = 10, opts = {}) {
   const picks = [];
   const seen = new Set();
   const push = (idx) => {
@@ -463,28 +654,40 @@ function computeSomTopKIndices(rows, userMessage, triage, k = 10) {
     push(Number(triage.candidateIndex));
   }
   const engine = typeof window !== 'undefined' ? window.IG_DECISION : null;
-  const shortcut = engine ? engine.findShortcutIntent(userMessage) : null;
-  if (shortcut) {
-    const scored = rows
-      .map((r) => ({
-        r,
-        score: (function () {
-          const n = engine.normalizeLabel(r.label);
-          if (!n) return 0;
-          let best = 0;
-          for (const alias of shortcut.labels) {
-            const an = engine.normalizeLabel(alias);
-            if (!an) continue;
-            if (n === an) best = Math.max(best, 100);
-            else if (n.includes(an) && an.length >= 3) best = Math.max(best, 88);
-            else if (an.includes(n) && n.length >= 3) best = Math.max(best, 70);
-          }
-          return best;
-        })(),
-      }))
-      .filter((x) => x.score >= 60)
-      .sort((a, b) => b.score - a.score);
-    for (const s of scored) push(s.r.idx);
+  if (engine?.rankCandidatesForGoal) {
+    const ranked = engine.rankCandidatesForGoal({
+      goal: userMessage,
+      candidates: rows,
+      pageUrl: opts.pageUrl || '',
+      uiState: opts.uiState || null,
+      blockedFamilies: Array.isArray(opts.blockedFamilies) ? opts.blockedFamilies : [],
+      max: Math.max(k * 2, 12),
+    });
+    ranked.forEach((r) => push(r?.row?.idx));
+  } else {
+    const shortcut = engine ? engine.findShortcutIntent(userMessage) : null;
+    if (shortcut) {
+      const scored = rows
+        .map((r) => ({
+          r,
+          score: (function () {
+            const n = engine.normalizeLabel(r.label);
+            if (!n) return 0;
+            let best = 0;
+            for (const alias of shortcut.labels) {
+              const an = engine.normalizeLabel(alias);
+              if (!an) continue;
+              if (n === an) best = Math.max(best, 100);
+              else if (n.includes(an) && an.length >= 3) best = Math.max(best, 88);
+              else if (an.includes(n) && n.length >= 3) best = Math.max(best, 70);
+            }
+            return best;
+          })(),
+        }))
+        .filter((x) => x.score >= 60)
+        .sort((a, b) => b.score - a.score);
+      for (const s of scored) push(s.r.idx);
+    }
   }
   for (const r of rows) {
     if (picks.length >= k) break;
@@ -494,7 +697,7 @@ function computeSomTopKIndices(rows, userMessage, triage, k = 10) {
 }
 
 /** Triage-acceptance gate: confidence, valid candidate index, reasonable label agreement. */
-function validateTriageAcceptance(triage, rows) {
+function validateTriageAcceptance(triage, rows, goal = '', blockedFamilies = []) {
   if (!triage || !Array.isArray(rows) || !rows.length) return { accepted: false };
   const conf = Number(triage.confidence);
   if (!Number.isFinite(conf) || conf < 0.66) return { accepted: false, reason: 'low_conf' };
@@ -503,6 +706,10 @@ function validateTriageAcceptance(triage, rows) {
   const idx = rows.findIndex((r) => Number(r.idx) === Math.round(ci));
   if (idx < 0) return { accepted: false, reason: 'index_out_of_range' };
   const row = rows[idx];
+  const fam = labelFamily(row?.label || '');
+  if (Array.isArray(blockedFamilies) && blockedFamilies.includes(fam) && !rowAlignsWithGoal(row.label, goal)) {
+    return { accepted: false, reason: 'blocked_family' };
+  }
   const engine = typeof window !== 'undefined' ? window.IG_DECISION : null;
   if (engine && triage.elementLabel) {
     const a = engine.normalizeLabel(row.label);
@@ -594,6 +801,7 @@ document.getElementById('clear-btn').addEventListener('click', () => {
     state.stickyManualPause = false;
     state.lastCachePick = Object.create(null);
     state.cacheBustedKeys = new Set();
+    state.goalPickHistory = Object.create(null);
     cancelPendingNavigation();
     syncGuidanceEpochToStorage();
     hideContextStrip();
@@ -632,6 +840,19 @@ document.getElementById('next-step-btn').addEventListener('click', async () => {
   await analyzeCurrentPage(buildContinuationPrompt());
 });
 
+document.getElementById('forget-goal-btn').addEventListener('click', async () => {
+  if (!state.guidanceGoal || !hasActiveLlmKey()) {
+    showStatus('Start a goal first, then use this memory reset', false);
+    return;
+  }
+  await forgetCurrentGoalMemory();
+  addMessage(
+    'assistant',
+    'Forgot saved memory for this goal on this site. Re-analyzing this screen without replaying cache/history…'
+  );
+  await analyzeCurrentPage(buildContinuationPrompt());
+});
+
 document.getElementById('reset-guidance-btn').addEventListener('click', () => {
   state.guidanceGoal = '';
   state.guidanceStepsDone = [];
@@ -642,6 +863,7 @@ document.getElementById('reset-guidance-btn').addEventListener('click', () => {
   state.guidanceEpoch += 1;
   state.lastCachePick = Object.create(null);
   state.cacheBustedKeys = new Set();
+  state.goalPickHistory = Object.create(null);
   cancelPendingNavigation();
   syncGuidanceEpochToStorage();
   state.deepGuidanceOptIn = false;
@@ -1248,6 +1470,8 @@ async function analyzeCurrentPage(userMessage) {
     const candRows = Array.isArray(candRes?.rows) ? candRes.rows : [];
     const domSig = candRes?.domSig || '';
     const compactCandidatesText = engine.buildCompactCandidatesText(candRows, 1500);
+    const uiState =
+      engine?.detectUiState?.({ candidates: candRows, pageUrl: url }) || {};
     const candMs = performance.now() - tCand0;
 
     if (runEpoch !== state.guidanceEpoch) {
@@ -1255,10 +1479,45 @@ async function analyzeCurrentPage(userMessage) {
       return;
     }
 
+    const isContinuation = userMessageIsContinuation(userMessage);
+    const intentGoalRaw = (isContinuation ? (state.guidanceGoal || state.lastGoal) : userMessage) || '';
+    const intentGoal = String(intentGoalRaw).trim() || String(userMessage || '').trim();
+    const shortcutIntent = engine?.findShortcutIntent?.(intentGoal) || null;
+    const bypassHeuristicForContinuation = isContinuation && shortcutIntent?.name === 'sponsors';
+
     const hasKey = hasActiveLlmKey();
     const provider = state.llmProvider;
     const apiKey = getApiKeyForProvider(provider).trim();
-    const cacheKey = engine.makeCacheKey(state.guidanceDomain, userMessage);
+    const cacheKey = engine.makeCacheKey(state.guidanceDomain, intentGoal);
+    const blockedFamilies = getBlockedFamilies(cacheKey, intentGoal);
+    const flowPolicyHit = engine?.runFlowPolicyHeuristic?.({
+      goal: intentGoal,
+      pageUrl: url,
+      candidates: candRows,
+      uiState,
+      blockedFamilies,
+    }) || null;
+    const rankedPreview = engine?.rankCandidatesForGoal
+      ? engine.rankCandidatesForGoal({
+          goal: intentGoal,
+          candidates: candRows,
+          pageUrl: url,
+          uiState,
+          blockedFamilies,
+          max: 3,
+        })
+      : [];
+    igLog('ranking', {
+      flowPolicyMatched: Boolean(flowPolicyHit?.hit),
+      uiState,
+      blockedFamilies,
+      top3Candidates: rankedPreview.map((r) => ({
+        idx: r?.row?.idx,
+        label: r?.row?.label,
+        score: r?.score,
+        reasons: r?.reasons,
+      })),
+    });
 
     // Stage 1 — cache + heuristic shortcut (zero network).
     // Bust stale cache entries when the user asks the same goal again quickly:
@@ -1289,26 +1548,49 @@ async function analyzeCurrentPage(userMessage) {
       cache: cacheMap, cacheKey, domSig, candidates: candRows,
     });
     if (cacheHit?.hit) {
-      response = buildResponseFromCandidate(cacheHit.row, {
-        source: 'cache',
-        description: `Click **${cacheHit.row.label}** — remembered from a previous visit.`,
-        confidence: 0.95,
-        pageTitle: pageInfo?.title || activeTab?.title || '',
-      });
-      stage = 'cache';
-      scanSummaryLine = '⚡ **Shortcut:** recognized this goal on this site from a previous visit.';
-      state.lastCachePick[cacheKey] = now;
-    } else {
-      const heur = engine.runStage1Heuristic({ goal: userMessage, candidates: candRows });
-      if (heur?.hit) {
-        response = buildResponseFromCandidate(heur.row, {
-          source: 'heuristic',
-          description: `Click **${heur.row.label}**.`,
-          confidence: 0.9,
+      const cacheFam = labelFamily(cacheHit.row?.label || '');
+      const cacheBlocked = blockedFamilies.includes(cacheFam) && !rowAlignsWithGoal(cacheHit.row?.label, intentGoal);
+      if (!cacheBlocked) {
+        response = buildResponseFromCandidate(cacheHit.row, {
+          source: 'cache',
+          description: `Click **${cacheHit.row.label}** — remembered from a previous visit.`,
+          confidence: 0.95,
           pageTitle: pageInfo?.title || activeTab?.title || '',
         });
-        stage = 'heuristic';
-        scanSummaryLine = `⚡ **Fast match:** matched a common "${heur.intent}" control on this page.`;
+        stage = 'cache';
+        scanSummaryLine = '⚡ **Shortcut:** recognized this goal on this site from a previous visit.';
+        state.lastCachePick[cacheKey] = now;
+      }
+    }
+    if (!response) {
+      const flow = flowPolicyHit;
+      if (flow?.hit) {
+        response = buildResponseFromCandidate(flow.row, {
+          source: 'flow_policy',
+          description: `Click **${flow.row.label}**.`,
+          confidence: 0.96,
+          pageTitle: pageInfo?.title || activeTab?.title || '',
+        });
+        stage = 'flow_policy';
+        scanSummaryLine = `🧭 **Flow policy:** ${flow.policy} (${flow.reason}).`;
+      } else {
+        if (!bypassHeuristicForContinuation) {
+          const heur = engine.runStage1Heuristic({ goal: intentGoal, candidates: candRows });
+          if (heur?.hit) {
+            const fam = labelFamily(heur.row?.label || '');
+            const blocked = blockedFamilies.includes(fam) && !rowAlignsWithGoal(heur.row?.label, intentGoal);
+            if (!blocked) {
+              response = buildResponseFromCandidate(heur.row, {
+                source: 'heuristic',
+                description: `Click **${heur.row.label}**.`,
+                confidence: 0.9,
+                pageTitle: pageInfo?.title || activeTab?.title || '',
+              });
+              stage = 'heuristic';
+              scanSummaryLine = `⚡ **Fast match:** matched a common "${heur.intent}" control on this page.`;
+            }
+          }
+        }
       }
     }
     const stage1Ms = performance.now() - tStage1;
@@ -1346,7 +1628,7 @@ async function analyzeCurrentPage(userMessage) {
       }
 
       if (triageRes && !triageRes.error) {
-        const gate = validateTriageAcceptance(triageRes, candRows);
+        const gate = validateTriageAcceptance(triageRes, candRows, intentGoal, blockedFamilies);
         if (gate.accepted) {
           const row = candRows[gate.idx];
           response = buildResponseFromCandidate(row, {
@@ -1414,7 +1696,11 @@ async function analyzeCurrentPage(userMessage) {
       } else {
         setAnalyzeStatus(typingEl, `Zooming in with ${providerDisplayName(provider)} vision…`);
         const k = Math.min(10, Math.max(3, candRows.length));
-        const topK = computeSomTopKIndices(candRows, userMessage, triageRes, k);
+        const topK = computeSomTopKIndices(candRows, intentGoal, triageRes, k, {
+          pageUrl: url,
+          uiState,
+          blockedFamilies,
+        });
 
         const [hull, rawCapture] = await Promise.all([
           computeCropHullFromTab(activeTab.id, topK),
@@ -1496,7 +1782,9 @@ async function analyzeCurrentPage(userMessage) {
           const authoritativeLabel = chosenRow.label;
           const modelLabel = String(somRes?.elementLabel || '').trim();
           const labelAgrees = rowLabelMatchesText(chosenRow.label, modelLabel);
-          const goalAlignsWithRow = rowAlignsWithGoal(chosenRow.label, userMessage);
+          const goalAlignsWithRow = rowAlignsWithGoal(chosenRow.label, intentGoal);
+          const family = labelFamily(chosenRow.label);
+          const familyBlocked = blockedFamilies.includes(family) && !goalAlignsWithRow;
 
           // Rewrite the description if the model's label disagrees with the row,
           // so the tip bubble does not say "Sponsors" while highlighting "Stars".
@@ -1504,15 +1792,18 @@ async function analyzeCurrentPage(userMessage) {
           const mentionsRowLabel = rawDescription
             ? rowLabelMatchesText(chosenRow.label, rawDescription)
             : false;
-          const description = labelAgrees || mentionsRowLabel || !rawDescription
+          const description = familyBlocked
+            ? 'That target keeps leading to the wrong place. Open your profile/avatar menu first, then choose **Sponsors** from that menu.'
+            : (labelAgrees || mentionsRowLabel || !rawDescription
             ? (rawDescription || `Click **${authoritativeLabel}**.`)
-            : `Click **${authoritativeLabel}** — closest thing I can see for this goal here. If it is not the right control, tap **Next step**.`;
+            : `Click **${authoritativeLabel}** — closest thing I can see for this goal here. If it is not the right control, tap **Next step**.`);
 
           // Demote confidence when the model's pick has zero goal-keyword overlap —
           // prevents a confident wrong highlight from being written to cache.
           const rawConf = Number(somRes?.confidence);
           const baseConf = Number.isFinite(rawConf) ? Math.max(0, Math.min(1, rawConf)) : 0.4;
           let adjustedConf = baseConf;
+          if (familyBlocked) adjustedConf = Math.min(adjustedConf, 0.2);
           if (!goalAlignsWithRow && !labelAgrees) adjustedConf = Math.min(adjustedConf, 0.45);
           else if (!goalAlignsWithRow) adjustedConf = Math.min(adjustedConf, 0.6);
 
@@ -1550,6 +1841,28 @@ async function analyzeCurrentPage(userMessage) {
       return;
     }
 
+    // Convert "no clear target, but try profile dropdown" style narratives into an
+    // actual clickable suggestion when rows are available.
+    if (response) {
+      const recovered = recoverActionableStepFromRows({
+        response,
+        intentGoal,
+        rows: candRows,
+        pageUrl: url,
+        uiState,
+        blockedFamilies,
+        pageTitle: pageInfo?.title || activeTab?.title || '',
+      });
+      if (recovered) {
+        response = recovered;
+        stage = 'policy_recovery';
+        scanSummaryLine = '🧭 **Smart recovery:** converted a narrative hint into the next concrete click.';
+      }
+    }
+    if (response) {
+      response = applyCriticalIntentGuards(response, candRows, intentGoal);
+    }
+
     const analyzeWallMs = performance.now() - tAnalyze0;
     const usedVision = stage === 'som_vision';
     igLog('timings', {
@@ -1578,7 +1891,7 @@ async function analyzeCurrentPage(userMessage) {
       ? rowLabelMatchesText(cacheWriteRow.label, response?.elementLabel || '')
       : false;
     const rowAlignsWithAsk = cacheWriteRow
-      ? rowAlignsWithGoal(cacheWriteRow.label, userMessage)
+      ? rowAlignsWithGoal(cacheWriteRow.label, intentGoal)
       : false;
     if (
       response &&
@@ -1599,6 +1912,10 @@ async function analyzeCurrentPage(userMessage) {
         yPct: Number(response.y) || 0,
         ts: Date.now(),
       });
+    }
+
+    if (response && Number(response.confidence) > 0) {
+      recordGoalPick(cacheKey, response, intentGoal);
     }
 
     removeEl(typingEl);
@@ -1667,6 +1984,10 @@ async function analyzeCurrentPage(userMessage) {
     }
     if (scanSummaryLine) {
       msg = `${scanSummaryLine}\n\n${msg}`;
+    }
+    const fallbackUrl = engine?.fallbackUrlForGoal?.(intentGoal, url) || '';
+    if (fallbackUrl && (conf <= 0.25 || usedFallback || !response.elementLabel)) {
+      msg += `\n\nIf this screen still does not show the right control, open this direct fallback URL: ${fallbackUrl}`;
     }
     addMessage('assistant', msg);
 
