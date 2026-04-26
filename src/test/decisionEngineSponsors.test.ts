@@ -117,4 +117,95 @@ describe("decision engine sponsors flow policy", () => {
     expect(hit?.hit).toBe(true);
     expect(hit?.row?.label).toBe("Profile");
   });
+
+  it("classifies invite teammate intent deterministically", () => {
+    const intent = engine.classifyIntent("How do I invite a teammate?");
+    expect(intent?.name).toBe("invite_user");
+    expect(Number(intent?.confidence)).toBeGreaterThan(0.6);
+  });
+
+  it("uses deterministic verified flow for invite path", () => {
+    const candidates = [
+      { idx: 0, label: "Team", role: "menuitem", xPct: 12, yPct: 30 },
+      { idx: 1, label: "Invite member", role: "button", xPct: 82, yPct: 22 },
+      { idx: 2, label: "Billing", role: "menuitem", xPct: 12, yPct: 38 },
+    ];
+    const rec = engine.recommendDeterministicPath({
+      goal: "How do I invite a teammate?",
+      pageUrl: "https://app.example.com/settings/members",
+      pageTitle: "Workspace Settings",
+      candidates,
+      userRole: "admin",
+      blockedFamilies: [],
+    });
+    expect(rec?.hit).toBe(true);
+    expect(rec?.strategy).toBe("verified_flow");
+    expect(rec?.row?.label).toBe("Team");
+    expect(Number(rec?.confidence)).toBeGreaterThanOrEqual(0.85);
+  });
+
+  it("asks clarification for low-confidence deterministic match", () => {
+    const candidates = [
+      { idx: 0, label: "Home", role: "link", xPct: 8, yPct: 12 },
+      { idx: 1, label: "Overview", role: "tab", xPct: 26, yPct: 12 },
+    ];
+    const rec = engine.recommendDeterministicPath({
+      goal: "Please do the thing for me",
+      pageUrl: "https://app.example.com/dashboard",
+      candidates,
+      userRole: "member",
+      blockedFamilies: [],
+    });
+    expect(rec?.hit).toBe(false);
+    expect(rec?.strategy).toBe("clarify");
+    expect(Number(rec?.confidence)).toBeLessThan(0.6);
+  });
+
+  it("uses sponsors-specific clarification wording when sponsors missing", () => {
+    const candidates = [
+      { idx: 0, label: "Contribution settings", role: "button", xPct: 58, yPct: 40 },
+      { idx: 1, label: "Overview", role: "tab", xPct: 25, yPct: 19 },
+    ];
+    const rec = engine.recommendDeterministicPath({
+      goal: "how do I add sponsors to my account",
+      pageUrl: "https://github.com/some-user",
+      candidates,
+      userRole: "member",
+      blockedFamilies: [],
+    });
+    expect(rec?.strategy).toBe("clarify");
+    expect(String(rec?.clarifyingQuestion || "").toLowerCase()).toContain("sponsors");
+  });
+
+  it("penalizes non-billing rows for billing intent", () => {
+    const row = { idx: 0, label: "Profile", role: "button", xPct: 90, yPct: 8 };
+    const intent = engine.classifyIntent("update billing method");
+    const s = engine.scoreElementDeterministic({
+      goal: "update billing method",
+      intent,
+      row,
+      pageUrl: "https://example.com/home",
+      blockedFamilies: [],
+    });
+    expect(Number(s?.score)).toBeLessThan(0.6);
+  });
+
+  it("uses profile-first best guess for sponsors when confidence is low", () => {
+    const candidates = [
+      { idx: 0, label: "Contribution settings", role: "button", xPct: 62, yPct: 39 },
+      { idx: 1, label: "Avatar", role: "button", xPct: 95, yPct: 8 },
+      { idx: 2, label: "Overview", role: "tab", xPct: 24, yPct: 17 },
+    ];
+    const rec = engine.recommendDeterministicPath({
+      goal: "where can I add sponsors?",
+      pageUrl: "https://github.com/some-user",
+      candidates,
+      userRole: "member",
+      blockedFamilies: [],
+    });
+    expect(rec?.hit).toBe(true);
+    expect(rec?.strategy).toBe("action_graph");
+    expect(rec?.row?.label).toBe("Avatar");
+    expect(Number(rec?.confidence)).toBeGreaterThanOrEqual(0.8);
+  });
 });

@@ -34,7 +34,7 @@ if (!window.__integrationGuideListeners) {
     if (message.type === 'HIGHLIGHT_AT') {
       try {
         clearAllHighlights();
-        drawGhostMouse(
+        const out = drawGhostMouse(
           message.xPct,
           message.yPct,
           message.description,
@@ -42,7 +42,10 @@ if (!window.__integrationGuideListeners) {
           message.intentText || '',
           message.candidateIndex
         );
-        sendResponse({ success: true });
+        sendResponse({
+          success: Boolean(out?.drew && out?.targetFound),
+          targetFound: Boolean(out?.targetFound),
+        });
       } catch (e) {
         console.error('[Integration Guide] highlight failed', e);
         sendResponse({ success: false, error: String(e?.message || e) });
@@ -798,6 +801,11 @@ function drawGhostMouse(xPct, yPct, description, elementLabel, intentText, candi
     expandCollapsedAncestors(target);
   }
 
+  // Do not render a fake marker when we cannot resolve an actionable target.
+  if (!target) {
+    return { drew: false, targetFound: false };
+  }
+
   if (matchedForScroll && target) {
     scrollLabelTargetIntoView(target);
   } else {
@@ -830,6 +838,8 @@ function drawGhostMouse(xPct, yPct, description, elementLabel, intentText, candi
     const tip = document.createElement('div');
     layoutTipBubble(tip, description, ringRect, vw, vh);
   });
+
+  return { drew: true, targetFound: true };
 }
 
 function clearAllHighlights() {
@@ -843,7 +853,7 @@ function clearAllHighlights() {
 window.__integrationGuideDraw = function igDraw(payload) {
   try {
     clearAllHighlights();
-    drawGhostMouse(
+    return drawGhostMouse(
       payload.xPct,
       payload.yPct,
       payload.description || '',
@@ -853,5 +863,6 @@ window.__integrationGuideDraw = function igDraw(payload) {
     );
   } catch (e) {
     console.error('[Integration Guide] __integrationGuideDraw', e);
+    return { drew: false, targetFound: false };
   }
 };

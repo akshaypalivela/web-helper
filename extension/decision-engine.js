@@ -228,6 +228,79 @@
     },
   ];
 
+  // Deterministic intent taxonomy for non-LLM routing.
+  const INTENT_RULES = [
+    {
+      name: 'invite_user',
+      test: /\b(invite|add teammate|add member|team invite|invite user)\b/i,
+      entities: ['invite', 'teammate', 'member', 'team'],
+      keywords: ['invite', 'member', 'team', 'people', 'user'],
+    },
+    {
+      name: 'create_project',
+      test: /\b(create project|new project|start project)\b/i,
+      entities: ['project'],
+      keywords: ['create', 'new', 'project'],
+    },
+    {
+      name: 'update_billing',
+      test: /\b(billing|payment|subscription|invoice|card)\b/i,
+      entities: ['billing', 'payment'],
+      keywords: ['billing', 'payment', 'invoice', 'subscription', 'card'],
+    },
+    {
+      name: 'change_password',
+      test: /\b(change password|reset password|password|security)\b/i,
+      entities: ['password', 'security'],
+      keywords: ['password', 'security', 'credential'],
+    },
+    {
+      name: 'manage_team',
+      test: /\b(manage team|team settings|permissions|roles|members?)\b/i,
+      entities: ['team', 'roles', 'permissions'],
+      keywords: ['team', 'member', 'role', 'permission', 'settings'],
+    },
+    {
+      name: 'export_report',
+      test: /\b(export|download report|csv|xlsx|report)\b/i,
+      entities: ['export', 'report'],
+      keywords: ['export', 'download', 'report', 'csv', 'xlsx'],
+    },
+    {
+      name: 'book_resource',
+      test: /\b(book|reserve|schedule|resource|room)\b/i,
+      entities: ['book', 'resource'],
+      keywords: ['book', 'reserve', 'schedule', 'resource', 'room'],
+    },
+    {
+      name: 'contact_support',
+      test: /\b(contact support|help|support|ticket|faq)\b/i,
+      entities: ['support'],
+      keywords: ['support', 'help', 'contact', 'ticket', 'faq', 'docs'],
+    },
+  ];
+
+  const VERIFIED_FLOWS = [
+    {
+      id: 'invite_user_settings_team',
+      intents: ['invite_user', 'manage_team'],
+      url: [/\/settings/i, /\/team/i, /\/members/i],
+      roles: ['owner', 'admin'],
+      successRate: 0.93,
+      stepAliases: ['team', 'members', 'people', 'invite', 'add member'],
+      successCriteria: ['invite modal opens', 'pending invite visible'],
+    },
+    {
+      id: 'update_billing_settings',
+      intents: ['update_billing'],
+      url: [/\/settings/i, /\/billing/i, /\/account/i],
+      roles: ['owner', 'admin', 'billing_admin'],
+      successRate: 0.9,
+      stepAliases: ['billing', 'payment', 'invoice', 'card', 'subscription'],
+      successCriteria: ['payment form visible'],
+    },
+  ];
+
   function labelAliasScore(aliases, rowLabel) {
     const rn = normalizeLabel(rowLabel);
     if (!rn) return 0;
@@ -402,6 +475,306 @@
     return ranked.slice(0, Math.max(1, Number(max) || 20));
   }
 
+  function classifyIntent(goal) {
+    const g = normalizeLabel(goal);
+    if (!g) {
+      return { name: 'unknown', entities: [], confidence: 0, normalizedGoal: '' };
+    }
+    let best = null;
+    let bestScore = 0;
+    for (const r of INTENT_RULES) {
+      let score = 0;
+      if (r.test.test(g)) score += 2;
+      const hits = (r.keywords || []).filter((k) => g.includes(normalizeLabel(k))).length;
+      score += Math.min(2, hits);
+      if (score > bestScore) {
+        best = r;
+        bestScore = score;
+      }
+    }
+    if (!best || bestScore <= 0) {
+      return { name: 'unknown', entities: [], confidence: 0.35, normalizedGoal: g };
+    }
+    return {
+      name: best.name,
+      entities: (best.entities || []).slice(),
+      confidence: Math.min(0.95, 0.55 + bestScore * 0.12),
+      normalizedGoal: g,
+    };
+  }
+
+  function labelFamilyFromLabel(label) {
+    const n = normalizeLabel(label || '');
+    if (/\bsponsors?\b/.test(n)) return 'sponsors';
+    if (/\bstars?\b|\bstarred\b/.test(n)) return 'stars';
+    if (/\bcontribution/.test(n)) return 'contribution';
+    if (/\bprofile\b|\baccount\b|\bavatar\b/.test(n)) return 'profile';
+    if (/\bsettings?\b|\bpreferences?\b/.test(n)) return 'settings';
+    const t = tokenizeWords(n)[0];
+    return t || 'other';
+  }
+
+  function buildStructuredUiMap({ candidates, pageUrl = '', pageTitle = '' }) {
+    const rows = Array.isArray(candidates) ? candidates : [];
+    const text = rows.map((r) => String(r?.label || '')).filter(Boolean).join(' ');
+    const byRole = (re) => rows.filter((r) => re.test(String(r?.role || '').toLowerCase()));
+    return {
+      currentUrl: String(pageUrl || ''),
+      pageTitle: String(pageTitle || ''),
+      visibleText: text.slice(0, 4000),
+      buttons: byRole(/\bbutton\b/),
+      links: byRole(/\blink\b/),
+      inputs: byRole(/\b(input|textbox|searchbox|combobox)\b/),
+      navItems: rows.filter((r) => /\b(menu|menuitem|tab|navigation|nav)\b/.test(String(r?.role || '').toLowerCase())),
+      modals: rows.filter((r) => includesAny(r?.label, ['modal', 'dialog', 'close'])),
+      tables: rows.filter((r) => /\b(row|cell|grid)\b/.test(String(r?.role || '').toLowerCase())),
+      elements: rows.slice(),
+    };
+  }
+
+  function lookupVerifiedFlow({ intent, pageUrl = '', userRole = 'member', candidates }) {
+    const role = normalizeLabel(userRole || 'member');
+    const flow = VERIFIED_FLOWS.find((f) => {
+      const intentOk = (f.intents || []).includes(intent?.name);
+      const urlOk = (f.url || []).some((re) => re.test(String(pageUrl || '')));
+      const roleOk = (f.roles || []).map((x) => normalizeLabel(x)).includes(role);
+      return intentOk && urlOk && roleOk;
+    });
+    if (!flow) return null;
+    const rows = Array.isArray(candidates) ? candidates : [];
+    const step = rows.find((r) => {
+      const label = normalizeLabel(r?.label || '');
+      return flow.stepAliases.some((a) => label.includes(normalizeLabel(a)));
+    });
+    if (!step) return null;
+    return {
+      hit: true,
+      flowId: flow.id,
+      row: step,
+      confidence: Math.min(0.98, 0.82 + flow.successRate * 0.16),
+      reason: `verified_flow:${flow.id}`,
+      successRate: flow.successRate,
+    };
+  }
+
+  function scoreElementDeterministic({
+    goal,
+    intent,
+    row,
+    pageUrl = '',
+    blockedFamilies = [],
+  }) {
+    const goalTokens = tokenizeWords(normalizeLabel(goal)).filter((t) => !GOAL_STOPWORDS.has(t));
+    const rowLabel = normalizeLabel(row?.label);
+    const rowTokens = tokenizeWords(rowLabel);
+    const role = normalizeLabel(row?.role || '');
+    if (!rowLabel) return { score: 0, reasons: ['empty_label'] };
+
+    const textHits = goalTokens.filter((t) => rowTokens.includes(t)).length;
+    const textMatch = goalTokens.length ? textHits / goalTokens.length : 0;
+    const intentRule = INTENT_RULES.find((r) => r.name === intent?.name);
+    const kwHits = intentRule
+      ? intentRule.keywords.filter((k) => rowLabel.includes(normalizeLabel(k))).length
+      : 0;
+    const semanticMatch = intentRule ? kwHits / Math.max(1, intentRule.keywords.length) : 0;
+    const roleWeight =
+      /\b(button|menuitem|tab|link)\b/.test(role) ? 1 : /\b(input|textbox|searchbox)\b/.test(role) ? 0.72 : 0.55;
+    const positionWeight = Number(row?.yPct) <= 75 ? 0.85 : 0.65;
+    const navWeight = /\b(menu|tab|navigation|nav)\b/.test(role) ? 0.92 : 0.74;
+    const urlWeight = /\/settings|\/account|\/team|\/members|\/billing/.test(String(pageUrl || '')) ? 0.82 : 0.65;
+
+    let blockedPenalty = 0;
+    const fam = labelFamilyFromLabel(rowLabel);
+    if (Array.isArray(blockedFamilies) && blockedFamilies.includes(fam)) blockedPenalty = 0.4;
+
+    let intentPenalty = 0;
+    if (intent?.name === 'update_billing') {
+      const billingish = /\b(billing|payment|invoice|subscription|card|plan)\b/.test(rowLabel);
+      if (!billingish) intentPenalty += 0.22;
+    }
+    if (intent?.name === 'invite_user' || intent?.name === 'manage_team') {
+      const teamish = /\b(invite|member|team|people|user|users)\b/.test(rowLabel);
+      if (!teamish) intentPenalty += 0.12;
+    }
+
+    const score = Math.max(
+      0,
+      Math.min(
+        1,
+        textMatch * 0.28 +
+          semanticMatch * 0.2 +
+          roleWeight * 0.14 +
+          positionWeight * 0.1 +
+          navWeight * 0.1 +
+          urlWeight * 0.08 +
+          Number(Boolean(row?.label)) * 0.1 -
+          intentPenalty -
+          blockedPenalty
+      )
+    );
+
+    return {
+      score,
+      reasons: [
+        `text:${textMatch.toFixed(2)}`,
+        `semantic:${semanticMatch.toFixed(2)}`,
+        `role:${roleWeight.toFixed(2)}`,
+        `intentPenalty:${intentPenalty.toFixed(2)}`,
+        `blockedPenalty:${blockedPenalty.toFixed(2)}`,
+      ],
+    };
+  }
+
+  function createActionGraphFromCandidates(candidates, pageUrl = '') {
+    const root = `state:${fnvHash(String(pageUrl || '')).slice(0, 8)}`;
+    const rows = Array.isArray(candidates) ? candidates : [];
+    const nodes = [{ id: root, type: 'ui_state', label: String(pageUrl || 'current page') }];
+    const edges = [];
+    for (const r of rows) {
+      const id = `el:${Number.isFinite(Number(r?.idx)) ? Number(r.idx) : nodes.length}`;
+      nodes.push({ id, type: 'element', label: String(r?.label || ''), idx: r?.idx });
+      edges.push({
+        from: root,
+        to: id,
+        action: /\b(input|textbox|searchbox)\b/.test(String(r?.role || '').toLowerCase()) ? 'type' : 'click',
+        cost: r?.visible === false ? 3 : 1,
+      });
+    }
+    return { nodes, edges };
+  }
+
+  function rankCandidatePaths({ goal, intent, candidates, pageUrl = '', blockedFamilies = [], max = 5 }) {
+    const graph = createActionGraphFromCandidates(candidates, pageUrl);
+    const byNode = new Map();
+    const rows = Array.isArray(candidates) ? candidates : [];
+    for (const r of rows) {
+      const id = `el:${Number.isFinite(Number(r?.idx)) ? Number(r.idx) : -1}`;
+      byNode.set(id, r);
+    }
+    const ranked = graph.edges
+      .map((e) => {
+        const row = byNode.get(e.to);
+        const s = scoreElementDeterministic({ goal, intent, row, pageUrl, blockedFamilies });
+        return { edge: e, row, score: s.score, reasons: s.reasons };
+      })
+      .filter((x) => x.row)
+      .sort((a, b) => b.score - a.score);
+    return ranked.slice(0, Math.max(1, Number(max) || 5));
+  }
+
+  function recommendDeterministicPath({
+    goal,
+    pageUrl = '',
+    pageTitle = '',
+    candidates,
+    userRole = 'member',
+    blockedFamilies = [],
+  }) {
+    const rows = Array.isArray(candidates) ? candidates : [];
+    if (!goal || !rows.length) return null;
+
+    const intent = classifyIntent(goal);
+    const shortcut = findShortcutIntent(goal);
+    const uiMap = buildStructuredUiMap({ candidates: rows, pageUrl, pageTitle });
+    const flow = lookupVerifiedFlow({ intent, pageUrl, userRole, candidates: rows });
+    if (flow?.hit && flow?.row) {
+      return {
+        hit: true,
+        strategy: 'verified_flow',
+        row: flow.row,
+        intent,
+        confidence: flow.confidence,
+        requiresConfirmation: flow.confidence < 0.85,
+        reason: flow.reason,
+        explanation: `Used verified flow (${flow.flowId}) with historical success ${Math.round(flow.successRate * 100)}%.`,
+        uiMap,
+      };
+    }
+
+    const ranked = rankCandidatePaths({
+      goal,
+      intent,
+      candidates: rows,
+      pageUrl,
+      blockedFamilies,
+      max: 3,
+    });
+    if (!ranked.length) {
+      const sponsorClarify = shortcut?.name === 'sponsors'
+        ? 'I cannot see a Sponsors control on this screen yet. Open your avatar/profile menu first, then choose Sponsors.'
+        : 'Should we do this from team settings, account settings, or project settings?';
+      return {
+        hit: false,
+        strategy: 'clarify',
+        intent,
+        confidence: Math.max(0.2, intent.confidence * 0.5),
+        requiresConfirmation: true,
+        clarifyingQuestion: sponsorClarify,
+        reason: 'no_ranked_candidates',
+        explanation: 'No deterministic target found in the visible controls.',
+        uiMap,
+      };
+    }
+
+    const top = ranked[0];
+    const confidence = Math.max(0, Math.min(1, Number(top.score) || 0));
+
+    // For sponsors flows, profile/avatar is often the right first move before Sponsors is visible.
+    if (shortcut?.name === 'sponsors' && confidence < 0.6) {
+      const profileLike = rows
+        .map((r) => ({
+          row: r,
+          alias: labelAliasScore(['profile', 'account', 'avatar', 'user menu'], r?.label || ''),
+        }))
+        .sort((a, b) => b.alias - a.alias)[0];
+      if (profileLike?.row && Number(profileLike.alias) >= 88) {
+        return {
+          hit: true,
+          strategy: 'action_graph',
+          row: profileLike.row,
+          intent,
+          confidence: 0.82,
+          requiresConfirmation: true,
+          reason: 'sponsors_profile_first_best_guess',
+          explanation: 'Sponsors control is not visible yet; open profile/account menu first as the most reliable next step.',
+          topCandidates: ranked,
+          uiMap,
+        };
+      }
+    }
+
+    if (confidence < 0.6) {
+      const sponsorClarify = shortcut?.name === 'sponsors'
+        ? 'This page does not show Sponsors yet. Open the profile/avatar menu or use the direct sponsors accounts page.'
+        : 'I am not confident from this screen yet. Which area should we open first: settings, team, billing, or support?';
+      return {
+        hit: false,
+        strategy: 'clarify',
+        intent,
+        confidence,
+        requiresConfirmation: true,
+        clarifyingQuestion: sponsorClarify,
+        reason: 'low_confidence',
+        explanation: `Top deterministic candidate was "${top?.row?.label || ''}" with low confidence.`,
+        topCandidates: ranked,
+        uiMap,
+      };
+    }
+
+    return {
+      hit: true,
+      strategy: 'action_graph',
+      row: top.row,
+      intent,
+      confidence,
+      requiresConfirmation: confidence < 0.85,
+      reason: `graph_top:${(top.reasons || []).join(',')}`,
+      explanation: `Deterministic path selected from structured UI map and action graph ranking.`,
+      topCandidates: ranked,
+      uiMap,
+    };
+  }
+
   function runFlowPolicyHeuristic({
     goal,
     pageUrl = '',
@@ -546,6 +919,13 @@
   NS.scoreCandidateForGoal = scoreCandidateForGoal;
   NS.rankCandidatesForGoal = rankCandidatesForGoal;
   NS.runFlowPolicyHeuristic = runFlowPolicyHeuristic;
+  NS.classifyIntent = classifyIntent;
+  NS.buildStructuredUiMap = buildStructuredUiMap;
+  NS.lookupVerifiedFlow = lookupVerifiedFlow;
+  NS.createActionGraphFromCandidates = createActionGraphFromCandidates;
+  NS.rankCandidatePaths = rankCandidatePaths;
+  NS.scoreElementDeterministic = scoreElementDeterministic;
+  NS.recommendDeterministicPath = recommendDeterministicPath;
   NS.fallbackUrlForGoal = fallbackUrlForGoal;
   NS.runStage1Heuristic = runStage1Heuristic;
   NS.tryCacheResolve = tryCacheResolve;

@@ -984,7 +984,7 @@ async function deliverHighlight(tabId, response) {
     new Promise((resolve) => {
       chrome.tabs.sendMessage(tabId, { type: 'HIGHLIGHT_AT', ...payload }, (r) => {
         if (chrome.runtime.lastError) resolve(false);
-        else resolve(r?.success !== false);
+        else resolve(Boolean(r?.success));
       });
     });
 
@@ -1595,6 +1595,63 @@ async function analyzeCurrentPage(userMessage) {
     }
     const stage1Ms = performance.now() - tStage1;
 
+    // Stage 1.5 — deterministic recommendation pipeline
+    // (intent classification -> structured UI map -> verified flows -> action graph ranking).
+    if (!response && candRows.length) {
+      setAnalyzeStatus(typingEl, 'Running deterministic pathing…');
+      const deterministic = engine?.recommendDeterministicPath?.({
+        goal: intentGoal,
+        pageUrl: url,
+        pageTitle: pageInfo?.title || activeTab?.title || '',
+        candidates: candRows,
+        userRole: state?.userRole || 'member',
+        blockedFamilies,
+      });
+
+      if (deterministic?.hit && deterministic?.row) {
+        const conf = Math.max(0, Math.min(1, Number(deterministic.confidence) || 0));
+        const baseDescription = deterministic.requiresConfirmation
+          ? `Likely next step: click **${deterministic.row.label}**. Please confirm this matches what you want.`
+          : `Click **${deterministic.row.label}**.`;
+        response = buildResponseFromCandidate(deterministic.row, {
+          source: deterministic.strategy || 'deterministic',
+          description: baseDescription,
+          confidence: conf,
+          stepSummary: `Selected ${deterministic.row.label} via deterministic pathing`,
+          isMultiStep: conf < 0.85,
+          overallPlan: deterministic.explanation || '',
+          elementLabel: deterministic.row.label,
+          pageTitle: pageInfo?.title || activeTab?.title || '',
+        });
+        stage = conf >= 0.85 ? 'deterministic_direct' : 'deterministic_likely';
+        scanSummaryLine = `🧩 **Deterministic engine:** ${deterministic.strategy || 'action_graph'} (confidence ${Math.round(conf * 100)}%).`;
+      } else if (deterministic && Number(deterministic.confidence) < 0.6) {
+        // Low-confidence deterministic result: ask a clarifying question instead of
+        // forcing a confident click or escalating immediately to LLM.
+        response = {
+          success: true,
+          x: 50,
+          y: 44,
+          description:
+            deterministic.clarifyingQuestion ||
+            'I need one more detail before recommending a safe next click. Which area should we open first?',
+          confidence: Math.max(0, Math.min(1, Number(deterministic.confidence) || 0)),
+          elementLabel: 'Need clarification',
+          isMultiStep: false,
+          overallPlan: deterministic.explanation || '',
+          stepSummary: 'Requested clarification',
+          candidateIndex: -1,
+          usedFallback: true,
+          pageTitle: pageInfo?.title || activeTab?.title || '',
+          usedRemoteScrape: false,
+          timings: { stage: 'deterministic_clarify', llmMs: 0 },
+          _source: 'deterministic_clarify',
+        };
+        stage = 'deterministic_clarify';
+        scanSummaryLine = '🧩 **Deterministic engine:** low confidence, asked for clarification.';
+      }
+    }
+
     // Warm the capture in parallel when we'll likely need Stage 3
     let capturePromise = null;
     if (!response && canCapture && hasKey && engine.shouldWarmCapture(userMessage)) {
@@ -2008,11 +2065,12 @@ async function analyzeCurrentPage(userMessage) {
     }
 
     const labelTrim = (response.elementLabel || '').trim();
+    const ci = Number(response.candidateIndex);
     const shouldTryHighlight =
-      conf > 0 &&
-      (labelTrim ||
-        Number.isFinite(Number(response.x)) ||
-        Number.isFinite(Number(response.y)));
+      conf >= 0.35 &&
+      !usedFallback &&
+      (Number.isFinite(ci) && ci >= 0) &&
+      Boolean(labelTrim);
 
     if (shouldTryHighlight && activeTab?.id && runEpoch === state.guidanceEpoch) {
       const tHl0 = performance.now();
